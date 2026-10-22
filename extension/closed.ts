@@ -32,6 +32,9 @@ export function rowFromInfo(info: SessionInfo): SessionRow {
     cwd: info.cwd,
     updatedAt: info.modified.getTime(),
     sessionFile: info.path,
+    sessionId: info.id,
+    // Exactly what pi -r matches against.
+    searchText: `${info.id} ${info.name ?? ""} ${info.allMessagesText} ${info.cwd}`,
   };
 }
 

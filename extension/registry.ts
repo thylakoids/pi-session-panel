@@ -106,8 +106,9 @@ export function readRegistry(dir: string): RegistryRead {
     try {
       record = JSON.parse(readFileSync(path, "utf8")) as RegistryRecord;
     } catch {
-      // A record that cannot be parsed is worthless; drop it.
+      // A record that cannot be parsed is worthless; drop it and its directory.
       try { unlinkSync(path); } catch {}
+      try { rmdirSync(join(dir, entry)); } catch {}
       continue;
     }
     if (isAlive(pid)) {

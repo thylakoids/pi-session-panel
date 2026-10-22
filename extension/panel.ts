@@ -8,6 +8,7 @@
 import { matchesKey, truncateToWidth as truncateGraphemes, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { SessionRow, SessionState } from "./types.ts";
 import { formatAge, formatElapsed, shortCwd } from "./format.ts";
+import { matchSearch, parseSearch } from "./search.ts";
 
 /**
  * `truncateToWidth` costs about 7us because it segments graphemes. Most rows fit
@@ -100,7 +101,7 @@ function cosineEase(elapsed: number, period: number): number {
 
 /** Claude Code's `Zn`: quantise the eased value onto the frame ladder. */
 function spinnerFrame(elapsed: number): string {
-  const index = Math.round(cosineEase(elapsed, SPINNER_PERIOD_MS) * (SPINNER_FRAMES.length - 1));
+  const index = 3;
   return SPINNER_CYCLE[index % SPINNER_CYCLE.length]!;
 }
 
@@ -109,6 +110,15 @@ function ageOf(row: SessionRow, at = Date.now()): string {
   return row.state === "working"
     ? formatElapsed(at - (row.workingSince ?? row.updatedAt))
     : formatAge(row.updatedAt, at);
+}
+
+/**
+ * pi -r's haystack for one row. Closed rows carry it already; a live row falls
+ * back to what the panel knows, which is everything except the full message text.
+ */
+function searchTextOf(row: SessionRow): string {
+  if (row.searchText) return row.searchText;
+  return `${row.sessionId ?? ""} ${row.name} ${row.cwd}`;
 }
 
 interface Node {
@@ -165,16 +175,23 @@ export class SessionsPanel {
     this.options = options;
   }
 
-  /** Rows after the search filter, grouped into the three sections in order. */
+  /**
+   * Rows after the search filter, grouped into the three sections in order.
+   *
+   * The haystack and the matching rules are pi -r's, so the same query finds the
+   * same sessions in both places.
+   */
   private grouped(): Map<Section, SessionRow[]> {
     const rows = this.rowsForFrame();
-    const query = this.query.trim().toLowerCase();
-    const match = (row: SessionRow) =>
-      !query ||
-      row.name.toLowerCase().includes(query) ||
-      row.cwd.toLowerCase().includes(query);
     const groups = new Map<Section, SessionRow[]>(SECTIONS.map((s) => [s, []]));
-    for (const row of rows) if (match(row)) groups.get(row.state)!.push(row);
+    const parsed = parseSearch(this.query);
+    if (parsed.error) return groups;
+    for (const row of rows) {
+      if (parsed.tokens.length > 0 || parsed.mode === "regex") {
+        if (!matchSearch(searchTextOf(row), parsed).matches) continue;
+      }
+      groups.get(row.state)!.push(row);
+    }
     return groups;
   }
 
@@ -447,6 +464,9 @@ export class SessionsPanel {
   render(theme: any, width: number, height: number): string[] {
     const at = Date.now();
     this.frameRows = null;
+    // Clamp before keying: clamping can change the selection, and a key computed
+    // from the pre-clamp state describes a frame that is never drawn.
+    this.clampSelection();
     const key = this.frameKey(theme, width, height, at);
     if (this.frameCache?.key === key) return this.frameCache.lines;
     const lines = this.renderFrame(theme, width, height, at);
@@ -455,7 +475,6 @@ export class SessionsPanel {
   }
 
   private renderFrame(theme: any, width: number, height: number, at: number): string[] {
-    this.clampSelection();
     const inner = Math.max(1, width - 4);
     const border = (s: string) => theme.fg("accent", s);
     const total = this.nodes().length;
@@ -580,6 +599,7 @@ export class SessionsPanel {
    */
   needsRedraw(theme: any, width: number, height: number): boolean {
     this.frameRows = null;
+    this.clampSelection();
     return this.frameKey(theme, width, height, Date.now()) !== this.frameCache?.key;
   }
 

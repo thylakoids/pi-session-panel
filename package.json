@@ -30,5 +30,8 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@earendil-works/pi-tui": "1.4.0"
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types test/*.test.ts"
   }
 }

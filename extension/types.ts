@@ -17,4 +17,12 @@ export interface SessionRow {
   pane?: string;
   /** Session JSONL path. Closed rows and live rows that know their file. */
   sessionFile?: string;
+  /**
+   * Everything pi -r searches in this session: its id, name, all message text and
+   * cwd. Present for closed rows, which already parsed it, and filled lazily for
+   * live rows the first time a search runs.
+   */
+  searchText?: string;
+  /** Session id, shown and searched the way pi -r does. */
+  sessionId?: string;
 }
