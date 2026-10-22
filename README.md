@@ -2,11 +2,21 @@
 
 一个统一页面，用来管理这台机器上所有正在运行和历史 pi 会话。
 
-## 跑起来
+## 安装
 
 ```bash
-pi --extension ~/Agent/pi-session-panel/extension/index.ts
+pi install git:github.com/thylakoids/pi-session-panel
 ```
+
+装上之后每次开 pi 都自动加载，不需要任何参数。
+
+**本机开发时**装本地路径更省事，改完代码下次开 pi 就生效：
+
+```bash
+pi install ~/Agent/pi-session-panel
+```
+
+## 跑起来
 
 - `/sessions` 打开面板
 - 在输入框第一行行首再按一次 **左方向键** 打开面板
