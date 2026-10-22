@@ -45,7 +45,7 @@ function panel(rows: () => any[], actions: Partial<Record<string, unknown>> = {}
     notify: () => {},
     actions: {
       focus: () => calls.push("focus"),
-      adopt: () => calls.push("adopt"),
+      reopen: () => calls.push("reopen"),
       interrupt: () => calls.push("interrupt"),
       exit: () => calls.push("exit"),
       remove: () => calls.push("remove"),
@@ -128,6 +128,28 @@ test("X interrupts a working row, exits an idle row, and confirms for a closed r
   await instance.handleInput("j");
   await instance.handleInput("\r");
   assert.deepEqual(calls, ["interrupt", "exit", "remove"], "confirming must delete");
+});
+
+test("Enter reopens a closed session instead of replacing this one", async () => {
+  const rows = [
+    row({ key: "live:1", state: "working", workingSince: Date.now() - 1000 }),
+    row({ key: "closed:/tmp/x.jsonl", state: "closed", sessionFile: "/tmp/x.jsonl" }),
+  ];
+  const { instance, calls } = panel(() => rows);
+  instance.render(theme, 100, 20);
+
+  await instance.handleInput("j");
+  await instance.handleInput("\r");
+
+  // Reopening must never just navigate: it has to leave this session untouched.
+  assert.deepEqual(calls, ["reopen", "close"], "Enter on closed must reopen and close");
+});
+
+test("Enter on a live row jumps to its pane", async () => {
+  const { instance, calls } = panel(() => [row({ state: "working", workingSince: Date.now() - 1000 })]);
+  instance.render(theme, 100, 20);
+  await instance.handleInput("\r");
+  assert.deepEqual(calls, ["focus", "close"]);
 });
 
 test("R rescans and / searches", async () => {

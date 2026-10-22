@@ -32,8 +32,8 @@ export interface PanelActions {
   exit(row: SessionRow): void | Promise<void>;
   /** Delete the JSONL on disk. */
   remove(row: SessionRow): void | Promise<void>;
-  /** Take over the session in this window. */
-  adopt(row: SessionRow): void | Promise<void>;
+  /** Reopen the session in a window of its own. */
+  reopen(row: SessionRow): void | Promise<void>;
   rename(row: SessionRow, next: string): void | Promise<void>;
   /** Rescan the closed section from disk. */
   rescan(): void | Promise<void>;
@@ -372,11 +372,7 @@ export class SessionsPanel {
     if (!row) return;
 
     if (data === "\r" || data === "\n" || matchesKey(data, "return")) {
-      await this.act(() => (row.state === "closed" ? this.options.actions.adopt(row) : this.options.actions.focus(row)));
-      return;
-    }
-    if (data === "o") {
-      await this.act(() => this.options.actions.adopt(row));
+      await this.act(() => (row.state === "closed" ? this.options.actions.reopen(row) : this.options.actions.focus(row)));
       return;
     }
     if (data === "X") {

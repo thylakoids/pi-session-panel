@@ -6,7 +6,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { rm } from "node:fs/promises";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
 import { createGestureEditor } from "./editor.ts";
@@ -24,6 +24,24 @@ function runTmux(args: string[]): string {
     const stderr = (error as { stderr?: string }).stderr?.trim();
     throw new Error(stderr || `tmux ${args[0]} failed`);
   }
+}
+
+/** The tmux session this pi runs in, as a target tmux will accept. */
+function tmuxTarget(): string {
+  const pane = process.env.TMUX_PANE;
+  if (pane) {
+    try {
+      return runTmux(["display-message", "-p", "-t", pane, "#{session_name}"]).trim();
+    } catch {
+      // Fall through to the default target.
+    }
+  }
+  return "";
+}
+
+/** tmux window names cannot carry the characters a session name might. */
+function windowName(name: string): string {
+  return name.replace(/[^\p{L}\p{N} ._\-/]/gu, "").trim().slice(0, 40) || "session";
 }
 
 export default function (pi: ExtensionAPI) {
@@ -132,7 +150,7 @@ export default function (pi: ExtensionAPI) {
             notify: (message, type) => context.ui.notify(message, type),
             actions: {
               focus: (row) => focusPane(row, context),
-              adopt: (row) => adopt(row, context, close),
+              reopen: (row) => restore(row),
               interrupt: (row) => interrupt(row),
               exit: (row) => exit(row, context),
               remove: (row) => removeSession(row),
@@ -193,14 +211,38 @@ export default function (pi: ExtensionAPI) {
     runTmux(["select-pane", "-t", row.pane]);
   };
 
-  const adopt = async (row: SessionRow, context: ExtensionContext, close: () => void) => {
-    if (!row.sessionFile) throw new Error("This session has no file to open.");
-    const command = context as Partial<ExtensionCommandContext>;
-    if (typeof command.switchSession !== "function") {
-      throw new Error("Switching sessions needs a command context; open the panel with /sessions.");
-    }
-    close();
-    await command.switchSession(row.sessionFile);
+/**
+ * Reopen a closed session in a tmux window of its own.
+ *
+ * This deliberately does not use `ctx.switchSession()`. That method only exists on
+ * the command context, so it would make the panel behave differently depending on
+ * how it was opened — and it would replace the session you are working in, which
+ * is not what reopening a closed session should mean. Spawning a window works
+ * from any context and leaves the current session alone.
+ */
+  const restore = (row: SessionRow) => {
+    if (!row.sessionFile) throw new Error("This session has no file to reopen.");
+    if (!process.env.TMUX) throw new Error("Reopening needs tmux.");
+    const target = tmuxTarget();
+    const pane = runTmux([
+      "new-window",
+      "-d",
+      "-P",
+      "-F",
+      "#{pane_id}",
+      "-t",
+      `${target}:`,
+      "-c",
+      row.cwd,
+      "-n",
+      windowName(row.name),
+      process.execPath,
+      process.argv[1]!,
+      "--session",
+      row.sessionFile,
+    ]).trim();
+    runTmux(["select-window", "-t", pane]);
+    runTmux(["select-pane", "-t", pane]);
   };
 
   /** Working rows: send Escape, which is what the user would press. */
