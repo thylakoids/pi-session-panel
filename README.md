@@ -36,7 +36,7 @@ pi install ~/Agent/pi-session-panel
 |---|---|
 | `j` / `k` | 上下移动 |
 | `gg` / `G` | 跳到第一行 / 最后一行 |
-| `Enter` | Working、Idle：跳到那个 tmux pane；Closed：在 tmux 新窗口里重新打开 |
+| `Enter` | Working、Idle：跳到那个 tmux pane；Closed：恢复到 tmux session `pi-sessions` 的新窗口 |
 | `X` | 见上表 |
 | `r` | 改名（写入 `session_info`，与 `pi -r` 共享） |
 | `/` | 搜索（与 `pi -r` 同一套：模糊词、`"短语"`、`re:正则`） |
@@ -73,4 +73,4 @@ npm test
 - [docs/adr/0003](./docs/adr/0003-closed-index-in-memory.md) — closed 索引在内存里
 - [docs/adr/0004](./docs/adr/0004-left-arrow-gesture-editor.md) — 左方向键手势与全局编辑器替换
 - [docs/adr/0005](./docs/adr/0005-animation-costs-only-when-the-glyph-steps.md) — 动画只在字形真正变化时付出代价
-- [docs/adr/0006](./docs/adr/0006-reopen-in-a-new-window.md) — 恢复会话开新窗口，不替换当前会话
+- [docs/adr/0006](./docs/adr/0006-reopen-in-a-fixed-tmux-session.md) — 恢复会话放进固定名字的 tmux session

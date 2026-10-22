@@ -5,6 +5,7 @@
  * process's own record in the registry while it runs.
  */
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
@@ -19,10 +20,20 @@ import type { SessionRow } from "./types.ts";
 /** Run one tmux command, surfacing its stderr as the error message. */
 function runTmux(args: string[]): string {
   try {
-    return execFileSync("tmux", args, { encoding: "utf8" });
+    return execFileSync("tmux", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   } catch (error) {
     const stderr = (error as { stderr?: string }).stderr?.trim();
     throw new Error(stderr || `tmux ${args[0]} failed`);
+  }
+}
+
+/** Whether a tmux session exists. tmux answers this with its exit code. */
+function tmuxSessionExists(name: string): boolean {
+  try {
+    execFileSync("tmux", ["has-session", "-t", `=${name}`], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -211,38 +222,44 @@ export default function (pi: ExtensionAPI) {
     runTmux(["select-pane", "-t", row.pane]);
   };
 
+/** The fixed tmux session that holds reopened sessions. */
+const RESTORE_SESSION = "pi-sessions";
+
 /**
- * Reopen a closed session in a tmux window of its own.
+ * Reopen a closed session in its own window inside a dedicated tmux session.
+ *
+ * Reopened sessions get their own tmux session (`pi-sessions`) rather than a window
+ * next to your work: they are historical context you visit deliberately, and
+ * mixing them into the session you are working in buries the windows that matter.
  *
  * This deliberately does not use `ctx.switchSession()`. That method only exists on
- * the command context, so it would make the panel behave differently depending on
- * how it was opened — and it would replace the session you are working in, which
- * is not what reopening a closed session should mean. Spawning a window works
- * from any context and leaves the current session alone.
+ * the command context, so the panel would behave differently depending on how it
+ * was opened, and it would replace the session you are working in.
  */
   const restore = (row: SessionRow) => {
     if (!row.sessionFile) throw new Error("This session has no file to reopen.");
     if (!process.env.TMUX) throw new Error("Reopening needs tmux.");
-    const target = tmuxTarget();
-    const pane = runTmux([
-      "new-window",
-      "-d",
-      "-P",
-      "-F",
-      "#{pane_id}",
-      "-t",
-      `${target}:`,
-      "-c",
-      row.cwd,
-      "-n",
-      windowName(row.name),
-      process.execPath,
-      process.argv[1]!,
-      "--session",
-      row.sessionFile,
-    ]).trim();
+
+    const name = windowName(row.name);
+    const command = [process.execPath, process.argv[1]!, "--session", row.sessionFile];
+    // The restore session is created once and reused: the second reopen adds a
+    // window to it instead of failing because the session already exists.
+    const exists = tmuxSessionExists(RESTORE_SESSION);
+    const pane = runTmux(
+      exists
+        ? ["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", `${RESTORE_SESSION}:`, "-n", name, "-c", row.cwd, ...command]
+        : ["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", RESTORE_SESSION, "-n", name, "-c", row.cwd, ...command],
+    ).trim();
+
+    if (pane === "") throw new Error("tmux did not create a window.");
     runTmux(["select-window", "-t", pane]);
     runTmux(["select-pane", "-t", pane]);
+    // Bring the user there, if a client is attached.
+    try {
+      runTmux(["switch-client", "-t", RESTORE_SESSION]);
+    } catch {
+      // Detached: the session exists, it just cannot be shown right now.
+    }
   };
 
   /** Working rows: send Escape, which is what the user would press. */
