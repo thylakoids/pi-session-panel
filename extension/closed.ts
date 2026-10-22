@@ -1,0 +1,56 @@
+/**
+ * The closed section: sessions with no process, read from disk the same way
+ * `pi -r` reads them. See docs/adr/0003.
+ *
+ * `SessionManager.listAll()` reads the head of every JSONL file, which is far too
+ * slow to run on a tick. It runs once, asynchronously, and the result is kept as
+ * an in-memory index. Exiting a live session inserts one row into that index
+ * directly: everything needed is already known at that moment.
+ */
+import { SessionManager, type SessionInfo } from "@earendil-works/pi-coding-agent";
+import type { SessionRow } from "./types.ts";
+
+export interface ClosedIndex {
+  rows: SessionRow[];
+  loadedAt: number;
+}
+
+/** First line of a message, collapsed, so a pasted blob cannot dominate the list. */
+function firstLine(text: string, limit = 100): string {
+  const line = text.split("\n").find((part) => part.trim().length > 0) ?? text;
+  const collapsed = line.replace(/\s+/g, " ").trim();
+  return collapsed.length > limit ? collapsed.slice(0, limit) + "…" : collapsed;
+}
+
+/** Turn a `pi -r` record into a panel row, using pi's own display rule. */
+export function rowFromInfo(info: SessionInfo): SessionRow {
+  return {
+    key: `closed:${info.path}`,
+    state: "closed",
+    // pi -r shows the name, else the first user message, else "(no messages)".
+    name: info.name ?? firstLine(info.firstMessage),
+    cwd: info.cwd,
+    updatedAt: info.modified.getTime(),
+    sessionFile: info.path,
+  };
+}
+
+/** Load every session on disk. Slow; call from an async context, never per frame. */
+export async function loadClosed(sessionDir?: string, signal?: AbortSignal): Promise<SessionRow[]> {
+  const infos = sessionDir
+    ? await SessionManager.listAll(sessionDir, undefined, signal)
+    : await SessionManager.listAll(undefined, signal);
+  return infos.map(rowFromInfo).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/**
+ * Insert one row into an existing index, keeping it sorted. This is what makes
+ * "exit a session and watch it appear in Closed" instant instead of a rescan.
+ */
+export function insertClosed(index: ClosedIndex, row: SessionRow): ClosedIndex {
+  if (index.rows.some((r) => r.key === row.key)) return index;
+  const at = index.rows.findIndex((r) => r.updatedAt < row.updatedAt);
+  const rows = [...index.rows];
+  rows.splice(at < 0 ? rows.length : at, 0, row);
+  return { ...index, rows };
+}
