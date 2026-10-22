@@ -10,7 +10,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@e
 import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
 import { createGestureEditor } from "./editor.ts";
-import { SessionsPanel, currentGlyph } from "./panel.ts";
+import { SessionsPanel } from "./panel.ts";
 import { loadClosed, insertClosed, rowFromInfo, type ClosedIndex } from "./closed.ts";
 import { ownPane, rowFromRecord } from "./live.ts";
 import { readRegistry, registryDir, removeRecord, writeRecord, type RegistryRecord } from "./registry.ts";
@@ -137,21 +137,24 @@ export default function (pi: ExtensionAPI) {
               exit: (row) => exit(row, context),
               remove: (row) => removeSession(row),
               rename: (row, next) => rename(row, next),
+              rescan: () => rescan(context),
             },
           });
 
-          // Only redraw when the spinner actually steps.
-          let lastGlyph = "";
+          // Poll faster than the spinner steps, but only redraw when the frame
+          // key actually differs: a no-op tick costs one key comparison.
+          let columns = 80;
+          const height = () => Math.max(8, Math.min(40, Math.floor((tui.terminal?.rows ?? 40) * 0.85)));
           const timer = setInterval(() => {
-            const glyph = currentGlyph();
-            if (glyph === lastGlyph) return;
-            lastGlyph = glyph;
-            tui.requestRender();
+            if (panel.needsRedraw(theme, columns, height())) tui.requestRender();
           }, 50);
 
           return {
             invalidate() {},
-            render: (columns: number) => panel.render(theme, columns, Math.max(8, Math.min(40, Math.floor((tui.terminal?.rows ?? 40) * 0.85)))),
+            render: (nextColumns: number) => {
+              columns = nextColumns;
+              return panel.render(theme, columns, height());
+            },
             handleInput: (data: string) => {
               if (matchesKey(data, "left")) {
                 close();
@@ -210,7 +213,11 @@ export default function (pi: ExtensionAPI) {
   const exit = (row: SessionRow, context: ExtensionContext) => {
     const pid = Number(row.key.replace("live:", ""));
     if (!Number.isInteger(pid)) throw new Error("This session has no process to stop.");
-    process.kill(pid, "SIGTERM");
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch (error) {
+      throw new Error(`Could not stop pid ${pid}: ${(error as Error).message}`);
+    }
     // The row lands in Closed straight away, without rescanning the disk.
     if (closedIndex) {
       closedIndex = insertClosed(closedIndex, {
@@ -226,6 +233,7 @@ export default function (pi: ExtensionAPI) {
 
   const removeSession = async (row: SessionRow) => {
     if (!row.sessionFile) throw new Error("This session has no file to delete.");
+    if (row.state !== "closed") throw new Error("Only a closed session can be deleted.");
     await rm(row.sessionFile, { force: true });
     if (closedIndex) {
       closedIndex = { ...closedIndex, rows: closedIndex.rows.filter((r) => r.key !== row.key) };
@@ -238,6 +246,19 @@ export default function (pi: ExtensionAPI) {
     manager.appendSessionInfo(next);
     if (closedIndex) {
       closedIndex = { ...closedIndex, rows: closedIndex.rows.map((r) => (r.key === row.key ? { ...r, name: next } : r)) };
+    }
+    // A live session's name lives in its own process; tell it, so the next frame
+    // shows the new name instead of the one it registered at startup.
+    const pid = Number(row.key.replace("live:", ""));
+    if (Number.isInteger(pid) && pid !== self.pid) {
+      const live = readRegistry(registry).live.find((r) => r.pid === pid);
+      if (live) {
+        try {
+          writeRecord(registry, { ...live, name: next, updatedAt: Date.now() });
+        } catch {
+          // Best effort: the file already carries the new name.
+        }
+      }
     }
   };
 

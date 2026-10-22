@@ -1,4 +1,3 @@
-/** Pick the glyph for one point inside one breath. */
 /**
  * The Sessions panel.
  *
@@ -7,6 +6,8 @@
  * part that needs real scrolling.
  */
 import { matchesKey, truncateToWidth as truncateGraphemes, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import type { SessionRow, SessionState } from "./types.ts";
+import { formatAge, formatElapsed, shortCwd } from "./format.ts";
 
 /**
  * `truncateToWidth` costs about 7us because it segments graphemes. Most rows fit
@@ -20,8 +21,6 @@ function truncateToWidth(text: string, width: number, ellipsis = "", keepTail = 
   if (visibleWidth(text) <= width) return text;
   return truncateGraphemes(text, width, ellipsis, keepTail);
 }
-import type { SessionRow, SessionState } from "./types.ts";
-import { formatAge, formatElapsed, shortCwd } from "./format.ts";
 
 export interface PanelActions {
   /** Jump to the tmux pane. Only meaningful for live rows that live in tmux. */
@@ -35,6 +34,8 @@ export interface PanelActions {
   /** Take over the session in this window. */
   adopt(row: SessionRow): void | Promise<void>;
   rename(row: SessionRow, next: string): void | Promise<void>;
+  /** Rescan the closed section from disk. */
+  rescan(): void | Promise<void>;
 }
 
 export interface PanelOptions {
@@ -54,9 +55,8 @@ const SECTION_TITLE: Record<Section, string> = {
   closed: "Closed",
 };
 
-/** One glyph per state, following Claude Code: thinking, resting, finished. */
-const STATE_GLYPH: Record<SessionState, string> = {
-  working: "✻",
+/** The resting and finished glyphs. Working rows animate instead. */
+const STATE_GLYPH: Record<Exclude<SessionState, "working">, string> = {
   idle: "·",
   closed: "○",
 };
@@ -99,10 +99,6 @@ function cosineEase(elapsed: number, period: number): number {
 }
 
 /** Claude Code's `Zn`: quantise the eased value onto the frame ladder. */
-export function currentGlyph(at = Date.now()): string {
-  return spinnerFrame(at);
-}
-
 function spinnerFrame(elapsed: number): string {
   const index = Math.round(cosineEase(elapsed, SPINNER_PERIOD_MS) * (SPINNER_FRAMES.length - 1));
   return SPINNER_CYCLE[index % SPINNER_CYCLE.length]!;
@@ -344,6 +340,14 @@ export class SessionsPanel {
       this.jumpToEdge("last");
       return;
     }
+    if (data === "R") {
+      try {
+        await this.options.actions.rescan();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+      return;
+    }
     if (data === "/") {
       this.searching = true;
       return;
@@ -555,7 +559,7 @@ export class SessionsPanel {
 
     while (body.length < Math.max(1, height - 5)) body.push("");
 
-    const hint = truncateToWidth("← again to close", inner);
+    const hint = truncateToWidth("← again to close  ·  R rescan  ·  / search", inner);
     const framed = [
       top,
       border("│") + " ".repeat(Math.max(0, width - 2)) + border("│"),
@@ -565,6 +569,18 @@ export class SessionsPanel {
     ];
 
     return framed.map((line) => padEndVisible(truncateToWidth(line, width), width));
+  }
+
+  /**
+   * Whether a redraw right now would change anything.
+   *
+   * The spinner steps every ~167ms, but the host polls faster than that. Asking
+   * the real frame key is exact: it also catches a second rolling over, the data
+   * changing, or a selection moving, none of which a glyph comparison would see.
+   */
+  needsRedraw(theme: any, width: number, height: number): boolean {
+    this.frameRows = null;
+    return this.frameKey(theme, width, height, Date.now()) !== this.frameCache?.key;
   }
 
   dispose(): void {

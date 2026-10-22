@@ -41,6 +41,7 @@ pi install ~/Agent/pi-session-panel
 | `X` | 见上表 |
 | `r` | 改名（写入 `session_info`，与 `pi -r` 共享） |
 | `/` | 搜索 |
+| `R` | 重新扫描 closed 分区 |
 | `q` / `Esc` / `←` | 关闭面板 |
 
 ## 它看不见什么
