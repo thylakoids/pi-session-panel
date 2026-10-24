@@ -15,7 +15,7 @@ import { SessionsPanel } from "../extension/panel.ts";
 import { readRegistry, writeRecord, removeRecord } from "../extension/registry.ts";
 import { closedScanDir, insertClosed } from "../extension/closed.ts";
 import { parseSearch, matchSearch } from "../extension/search.ts";
-import { cleanTitle, firstUserText, createNamer, resolveModel } from "../extension/naming.ts";
+import { buildUserPrompt, capInput, cleanTitle, createNamer, nameSource, resolveModel, sessionContent } from "../extension/naming.ts";
 import { spinnerGlyphAt as currentGlyphForTest } from "../extension/panel.ts";
 import { readConfig } from "../extension/config.ts";
 import { dedupeLive, withoutLiveDuplicates } from "../extension/live.ts";
@@ -268,21 +268,60 @@ test("cleanTitle strips quotes, punctuation and runaway length", () => {
   assert.equal(cleanTitle("   "), "");
 });
 
-test("firstUserText takes the first non-empty user line on the branch", () => {
+test("naming content is every human turn, in order, with no assistant or tool text", () => {
   const branch = [
     { type: "message", message: { role: "system", content: "" } },
-    { type: "message", message: { role: "user", content: "\n\n  first real line  \nsecond" } },
-    { type: "message", message: { role: "user", content: "later" } },
+    { type: "message", message: { role: "user", content: "看下这个" } },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "assistant noise" }] } },
+    { type: "message", message: { role: "toolResult", content: [{ type: "text", text: "tool noise" }] } },
+    { type: "message", message: { role: "user", content: [{ type: "text", text: "堆栈" }, { type: "image" }] } },
   ];
-  const context = { sessionManager: { getBranch: () => branch } } as any;
-  assert.equal(firstUserText(context), "first real line");
-  assert.equal(firstUserText({ sessionManager: { getBranch: () => [] } } as any), undefined);
+  // Claude Code names from every human turn, not just the first: a session that
+  // opens with "看下这个" only makes sense with the paste that follows it.
+  assert.equal(sessionContent(branch), "看下这个\n堆栈");
+  assert.equal(sessionContent(branch, "新的问题"), "看下这个\n堆栈\n新的问题", "the pending prompt is appended");
+  assert.equal(sessionContent([]), "");
+});
 
-  // The namer relies on this: an unusable message must yield undefined, not "".
+test("an unusable branch yields no name source", () => {
   for (const content of ["", "   \n  ", [], [{ type: "image" }]]) {
-    const ctx = { sessionManager: { getBranch: () => [{ type: "message", message: { role: "user", content } }] } } as any;
-    assert.equal(firstUserText(ctx), undefined, `content ${JSON.stringify(content)} must yield undefined`);
+    const branch = [{ type: "message", message: { role: "user", content } }];
+    assert.equal(nameSource(branch), undefined, `content ${JSON.stringify(content)} must yield undefined`);
   }
+});
+
+test("a message too thin to name is skipped, in any script", () => {
+  // Claude Code gates on a raw 10-character count, which is an English count: nine
+  // Chinese characters is a whole question, ten Latin characters is a fragment.
+  const tooThin = ["hi", "继续", "ok", "   ", "!"];
+  for (const content of tooThin) {
+    const branch = [{ type: "message", message: { role: "user", content } }];
+    assert.equal(nameSource(branch), undefined, JSON.stringify(content) + " must not spend a model call");
+  }
+  const enough = ["滑点模型为什么偏高", "rename the session panel", "检查 closed 分区"];
+  for (const content of enough) {
+    const branch = [{ type: "message", message: { role: "user", content } }];
+    assert.equal(nameSource(branch), content, JSON.stringify(content) + " is substantial enough to name");
+  }
+});
+
+test("an over-long message is elided in the middle, not truncated at the end", () => {
+  const head = "H".repeat(1500);
+  const middle = "M".repeat(3000);
+  const tail = "T".repeat(500);
+  const capped = capInput(head + middle + tail);
+  assert.equal(capped.length, 2000, "the result is capped at the input budget");
+  assert.ok(capped.startsWith(head), "the head survives");
+  assert.ok(capped.endsWith("T".repeat(400)), "the tail survives, because the ask is usually there");
+  assert.match(capped, /\[… 3500 characters omitted …\]/, "the omission is reported");
+
+  assert.equal(capInput("short enough"), "short enough", "a message under the cap is untouched");
+});
+
+test("the user prompt wraps the content in session tags and states the language rule", () => {
+  const prompt = buildUserPrompt("修一下滑点模型");
+  assert.ok(prompt.startsWith("<session>\n修一下滑点模型\n</session>"), prompt);
+  assert.match(prompt, /predominant language of the session/, "the language rule travels with the content");
 });
 
 test("the namer does nothing without a configured model", async () => {
@@ -294,7 +333,7 @@ test("the namer does nothing without a configured model", async () => {
   const context = {
     sessionManager: {
       getSessionName: () => undefined,
-      getBranch: () => [{ type: "message", message: { role: "user", content: "hello" } }],
+      getBranch: () => [{ type: "message", message: { role: "user", content: "rename the session panel" } }],
     },
     modelRegistry: { find: () => undefined, complete: async () => ({ content: [] }) },
   } as any;
@@ -311,7 +350,7 @@ test("the namer leaves an already-named session alone", async () => {
   const context = {
     sessionManager: {
       getSessionName: () => "already named",
-      getBranch: () => [{ type: "message", message: { role: "user", content: "hello" } }],
+      getBranch: () => [{ type: "message", message: { role: "user", content: "rename the session panel" } }],
     },
     modelRegistry: {
       find: () => ({ id: "model-a" }),
@@ -332,7 +371,7 @@ test("concurrent triggers spend one model call and write one name", async () => 
   const context = {
     sessionManager: {
       getSessionName: () => undefined,
-      getBranch: () => [{ type: "message", message: { role: "user", content: "hello" } }],
+      getBranch: () => [{ type: "message", message: { role: "user", content: "rename the session panel" } }],
     },
     modelRegistry: {
       find: () => ({ id: "model-a" }),
@@ -349,6 +388,30 @@ test("concurrent triggers spend one model call and write one name", async () => 
   assert.deepEqual(names, ["A short name"]);
 });
 
+test("a name the user typed during the model call is never overwritten", async () => {
+  const names: string[] = [];
+  // Undefined when the namer checks before the call, then a name, as if the user
+  // had renamed the session while the model was thinking.
+  let checks = 0;
+  const namer = createNamer({
+    pi: { setSessionName: (n: string) => names.push(n) } as any,
+    model: () => "p/model-a",
+  });
+  const context = {
+    sessionManager: {
+      getSessionName: () => (++checks === 1 ? undefined : "my own name"),
+      getBranch: () => [{ type: "message", message: { role: "user", content: "rename the session panel" } }],
+    },
+    modelRegistry: {
+      find: () => ({ id: "model-a" }),
+      complete: async () => ({ content: [{ type: "text", text: "Generated name" }] }),
+    },
+  } as any;
+
+  await namer(context);
+  assert.deepEqual(names, [], "a hand-typed name wins over the generated one");
+});
+
 test("a failed naming attempt is retried next time", async () => {
   const names: string[] = [];
   let attempt = 0;
@@ -359,7 +422,7 @@ test("a failed naming attempt is retried next time", async () => {
   const context = {
     sessionManager: {
       getSessionName: () => undefined,
-      getBranch: () => [{ type: "message", message: { role: "user", content: "hello" } }],
+      getBranch: () => [{ type: "message", message: { role: "user", content: "rename the session panel" } }],
     },
     modelRegistry: {
       find: () => ({ id: "model-a" }),
@@ -442,7 +505,7 @@ test("a broken model config is reported once, not on every prompt", async () => 
   const context = {
     sessionManager: {
       getSessionName: () => undefined,
-      getBranch: () => [{ type: "message", message: { role: "user", content: "hello" } }],
+      getBranch: () => [{ type: "message", message: { role: "user", content: "rename the session panel" } }],
     },
     modelRegistry: fakeRegistry([{ provider: "a", id: "other" }]),
   } as any;

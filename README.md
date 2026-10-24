@@ -38,6 +38,8 @@ pi install ~/Agent/pi-session-panel
 
 起名规则：会话没有名字、且已经有 user 消息时，生成一个短标题写进 `session_info`。有名字就不再改。
 
+送给模型的 context 与 Claude Code 2.1.304 的会话起名一致：分支上每一条真人 user 消息，1000 字符取尾部，单条过长时中间挖掉并标注，包在 `<session>` 标签里，语言指令写在 user turn。细节见 [ADR 0008](./docs/adr/0008-title-context-follows-claude-code.md)。
+
 ## 三个分区
 
 | 分区 | 来源 | X 键的含义 |
@@ -79,7 +81,7 @@ spinner 每 200ms 才换一帧，面板只在那一刻重绘，其余 tick 由�
 npm test
 ```
 
-9 个测试，每一个都用「先埋 bug、确认测试变红」验证过，没有装饰性的测试。
+35 个测试，每一个都用「先埋 bug、确认测试变红」验证过，没有装饰性的测试。
 
 ## 文档
 
@@ -91,3 +93,4 @@ npm test
 - [docs/adr/0005](./docs/adr/0005-animation-costs-only-when-the-glyph-steps.md) — 动画只在字形真正变化时付出代价
 - [docs/adr/0006](./docs/adr/0006-reopen-in-a-fixed-tmux-session.md) — 恢复会话放进固定名字的 tmux session
 - [docs/adr/0007](./docs/adr/0007-session-naming.md) — 自动起名：一个检查，两个触发点
+- [docs/adr/0008](./docs/adr/0008-title-context-follows-claude-code.md) — 起名的 context 对齐 Claude Code
