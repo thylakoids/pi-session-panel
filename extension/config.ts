@@ -26,8 +26,8 @@ export function configPath(agentDir: string): string {
  * only setting is a model id and making people write JSON to set one string is a
  * needless chance to get the syntax wrong.
  *
- *   "glm-5.3-flash"
- *   { "titleModel": "glm-5.3-flash" }
+ *   your-provider/your-model
+ *   { "titleModel": "your-provider/your-model" }
  */
 export function readConfig(agentDir: string): PanelConfig {
   let raw: string;
