@@ -15,7 +15,9 @@ import { SessionsPanel } from "../extension/panel.ts";
 import { readRegistry, writeRecord, removeRecord } from "../extension/registry.ts";
 import { insertClosed } from "../extension/closed.ts";
 import { parseSearch, matchSearch } from "../extension/search.ts";
-import { cleanTitle, firstUserText, createNamer } from "../extension/naming.ts";
+import { cleanTitle, firstUserText, createNamer, resolveModel } from "../extension/naming.ts";
+import { readConfig } from "../extension/config.ts";
+import { mkdtempSync as mkdtemp2, writeFileSync as writeFile2 } from "node:fs";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 const theme = {
@@ -371,4 +373,101 @@ test("a failed naming attempt is retried next time", async () => {
   assert.deepEqual(names, [], "a failure must not write a name");
   await namer(context);
   assert.deepEqual(names, ["Second time works"], "the retry must succeed");
+});
+
+/** A registry stub with a few models, shaped like the real one. */
+function fakeRegistry(models: { provider: string; id: string }[]) {
+  return {
+    find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
+    getModelsOfType: () => models,
+  } as any;
+}
+
+test("a bare model id resolves without a provider prefix", () => {
+  const registry = fakeRegistry([
+    { provider: "magpie", id: "auto/glm-5.3-flash" },
+    { provider: "magpie", id: "auto/deepseek-flash" },
+  ]);
+  const result = resolveModel(registry, "glm-5.3-flash");
+  assert.ok("model" in result, "a suffix must be enough");
+  assert.equal(result.model!.id, "auto/glm-5.3-flash");
+});
+
+test("an ambiguous id reports the candidates instead of guessing", () => {
+  // Suffix ambiguity with no preference given.
+  const registry = fakeRegistry([
+    { provider: "a", id: "auto/glm-5.3-flash" },
+    { provider: "b", id: "opencode-go/glm-5.3-flash" },
+  ]);
+  const result = resolveModel(registry, "glm-5.3-flash");
+  assert.ok("error" in result);
+  assert.match(result.error, /matches 2 models/);
+  assert.match(result.error, /auto\/glm-5\.3-flash/);
+});
+
+test("an ambiguous id resolves to the preferred provider", () => {
+  const registry = fakeRegistry([
+    { provider: "a", id: "auto/glm-5.3-flash" },
+    { provider: "b", id: "opencode-go/glm-5.3-flash" },
+  ]);
+  // No preference: ambiguous. With a preference: resolved, no config needed.
+  assert.ok("error" in resolveModel(registry, "glm-5.3-flash"));
+  const result = resolveModel(registry, "glm-5.3-flash", ["", "b"]);
+  assert.ok("model" in result);
+  assert.equal(result.model!.provider, "b");
+});
+
+test("an unknown model reports an error rather than resolving to nothing", () => {
+  const result = resolveModel(fakeRegistry([{ provider: "a", id: "other" }]), "nope");
+  assert.ok("error" in result);
+  assert.match(result.error, /no model matches/);
+});
+
+test("a full provider/id still wins over suffix matching", () => {
+  const registry = fakeRegistry([
+    { provider: "a", id: "glm-5.3-flash" },
+    { provider: "b", id: "glm-5.3-flash" },
+  ]);
+  const result = resolveModel(registry, "b/glm-5.3-flash");
+  assert.ok("model" in result);
+  assert.equal(result.model!.provider, "b");
+});
+
+test("config accepts a bare string or the object form", () => {
+  const dir = mkdtemp2(join(tmpdir(), "panel-config-"));
+  mkdirSync(join(dir, "session-panel"), { recursive: true });
+
+  writeFile2(join(dir, "session-panel", "config.json"), "glm-5.3-flash\n");
+  assert.deepEqual(readConfig(dir), { titleModel: "glm-5.3-flash" }, "bare string");
+
+  writeFile2(join(dir, "session-panel", "config.json"), '{ "titleModel": "x/y" }');
+  assert.deepEqual(readConfig(dir), { titleModel: "x/y" }, "object form");
+
+  writeFile2(join(dir, "session-panel", "config.json"), "");
+  assert.deepEqual(readConfig(dir), {}, "empty means off");
+
+  writeFile2(join(dir, "session-panel", "config.json"), "{ broken json");
+  assert.deepEqual(readConfig(dir), {}, "broken json means off, not a crash");
+});
+
+test("a broken model config is reported once, not on every prompt", async () => {
+  const reasons: string[] = [];
+  const namer = createNamer({
+    pi: { setSessionName: () => {} } as any,
+    model: () => "does-not-exist",
+    onBroken: (r) => reasons.push(r),
+  });
+  const context = {
+    sessionManager: {
+      getSessionName: () => undefined,
+      getBranch: () => [{ type: "message", message: { role: "user", content: "hello" } }],
+    },
+    modelRegistry: fakeRegistry([{ provider: "a", id: "other" }]),
+  } as any;
+
+  await namer(context);
+  await namer(context);
+  await namer(context);
+  assert.equal(reasons.length, 1, "one warning per process is enough");
+  assert.match(reasons[0]!, /no model matches/);
 });

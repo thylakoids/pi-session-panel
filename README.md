@@ -24,17 +24,25 @@ pi install ~/Agent/pi-session-panel
 
 ## 配置
 
-`~/.pi/agent/session-panel/config.json`，首次启动自动生成：
+`~/.pi/agent/session-panel/config.json`，首次启动自动生成（空文件）。
 
-```json
-{
-  "titleModel": "glm-5.3-flash"
-}
+只写一行模型 id 就行：
+
+```
+glm-5.3-flash
 ```
 
-`titleModel` 是给会话自动起名用的模型，写模型 id 即可，不需要 provider 前缀。**留空就不起名** —— 插件不带默认值，用哪个模型由你决定。
+也可以写成 JSON，两种都认：
 
-起名规则：会话没有名字、且已经有 user 消息时，用这个模型生成一个短标题，写进 `session_info`。有名字就不再改。
+```json
+{ "titleModel": "glm-5.3-flash" }
+```
+
+**留空就不起名** —— 插件不带默认值，用哪个模型由你决定。
+
+模型 id 不需要写 provider 前缀：同名模型存在于多个 provider 时，优先用你当前会话的 provider，其次用 `settings.json` 里的 `defaultProvider`。真的无法判断时会提示你该写哪个。
+
+起名规则：会话没有名字、且已经有 user 消息时，生成一个短标题写进 `session_info`。有名字就不再改。
 
 ## 三个分区
 

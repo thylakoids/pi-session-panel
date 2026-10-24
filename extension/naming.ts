@@ -44,30 +44,82 @@ export function cleanTitle(raw: string): string {
 
 export interface NamerOptions {
   pi: ExtensionAPI;
-  /** Model as `provider/model`, or undefined to disable naming. */
+  /** Model spec, or undefined to disable naming. */
   model: () => string | undefined;
+  /** Providers to prefer when the spec matches several, most preferred first. */
+  prefer?: () => readonly string[];
   /** Called after a name is written, so the host can refresh its registry record. */
   onNamed?: (name: string) => void;
+  /**
+   * Called at most once per process when naming cannot work. Naming fails
+   * silently by design, so without this a misconfigured model is invisible.
+   */
+  onBroken?: (reason: string) => void;
 }
 
 /**
- * Resolve `provider/model` against the live registry.
+ * Resolve a model spec against the live registry, forgivingly.
  *
- * Model ids may themselves contain slashes ("auto/glm-5.3-flash"), so only the
- * first slash separates provider from id. Failing that, try the whole spec as an
- * id under every provider: the registry is the authority, not the string shape.
+ * Users should not have to know whether an id needs a provider prefix, or that
+ * "auto/glm-5.3-flash" contains a slash of its own. Tried in order:
+ *
+ *   1. `provider/id`, splitting on the first slash
+ *   2. `id` alone, under every provider that has a model with that id
+ *   3. a unique suffix match, so "glm-5.3-flash" finds "auto/glm-5.3-flash"
+ *
+ * Returns `{ model }` or `{ error }` with a message worth showing, because a
+ * silent failure here looks exactly like a feature that was never built.
  */
-export function resolveModel(registry: ExtensionContext["modelRegistry"], spec: string) {
-  const slash = spec.indexOf("/");
+export function resolveModel(
+  registry: ExtensionContext["modelRegistry"],
+  spec: string,
+  /** Providers to prefer when the spec matches several, most preferred first. */
+  prefer: readonly string[] = [],
+): { model: NonNullable<ReturnType<typeof registry.find>> } | { error: string } {
+  const want = spec.trim();
+  if (!want) return { error: "titleModel is empty" };
+
+  const slash = want.indexOf("/");
   if (slash > 0) {
-    const direct = registry.find(spec.slice(0, slash), spec.slice(slash + 1));
-    if (direct) return direct;
+    const direct = registry.find(want.slice(0, slash), want.slice(slash + 1));
+    if (direct) return { model: direct };
   }
-  for (const provider of registry.getRegisteredProviderIds()) {
-    const model = registry.find(provider, spec);
-    if (model) return model;
+
+  const all = registry.getModelsOfType("chat");
+
+  /**
+   * Every model the spec could mean, best interpretation first.
+   *
+   * An exact id match is the strongest reading, but it is not automatically the
+   * right one: "glm-5.3-flash" is an exact id under five providers while the model
+   * the user means may be "auto/glm-5.3-flash" under their own. So both readings
+   * are collected together and narrowed by preference before ambiguity is judged.
+   */
+  const candidates = all.filter(
+    (model) => model.id === want || model.id.endsWith(`/${want}`),
+  );
+  const unique = [...new Map(candidates.map((model) => [`${model.provider}/${model.id}`, model])).values()];
+
+  if (unique.length === 1) return { model: unique[0]! };
+
+  // Prefer the providers the caller named, most preferred first.
+  for (const provider of prefer) {
+    const match = unique.filter((model) => model.provider === provider);
+    if (match.length >= 1) {
+      // Within one provider, prefer the shorter id: "glm-5.3-flash" over
+      // "opencode-go/glm-5.3-flash" when both exist there.
+      const best = [...match].sort((a, b) => a.id.length - b.id.length)[0]!;
+      return { model: best };
+    }
   }
-  return undefined;
+
+  if (unique.length === 0) return { error: `no model matches "${want}"` };
+  return {
+    error: `${want} matches ${unique.length} models; write one of: ${unique
+      .slice(0, 4)
+      .map((m) => `${m.provider}/${m.id}`)
+      .join(", ")}`,
+  };
 }
 
 /**
@@ -77,6 +129,8 @@ export function resolveModel(registry: ExtensionContext["modelRegistry"], spec: 
 export function createNamer(options: NamerOptions) {
   /** True only while a model call is in flight, so two hooks cannot race. */
   let generating = false;
+  /** Naming failures are reported once, not on every prompt. */
+  let reportedBroken = false;
 
   /**
    * `text` is the prompt that just arrived. At `before_agent_start` it is not on the
@@ -92,8 +146,16 @@ export function createNamer(options: NamerOptions) {
     const spec = options.model();
     if (!spec) return;
 
-    const model = resolveModel(context.modelRegistry, spec);
-    if (!model) return;
+    const resolved = resolveModel(context.modelRegistry, spec, options.prefer?.() ?? []);
+    if ("error" in resolved) {
+      // Once per process: the user needs to know, but not on every prompt.
+      if (!reportedBroken) {
+        reportedBroken = true;
+        options.onBroken?.(resolved.error);
+      }
+      return;
+    }
+    const model = resolved.model;
 
     generating = true;
     try {

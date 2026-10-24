@@ -13,7 +13,7 @@ import { matchesKey } from "@earendil-works/pi-tui";
 import { createGestureEditor } from "./editor.ts";
 import { SessionsPanel } from "./panel.ts";
 import { loadClosed, insertClosed, rowFromInfo, type ClosedIndex } from "./closed.ts";
-import { readConfig, writeConfigExample } from "./config.ts";
+import { configPath, readConfig, readDefaultProvider, writeConfigExample } from "./config.ts";
 import { createNamer } from "./naming.ts";
 import { ownPane, rowFromRecord } from "./live.ts";
 import { readRegistry, registryDir, removeRecord, writeRecord, type RegistryRecord } from "./registry.ts";
@@ -82,9 +82,17 @@ export default function (pi: ExtensionAPI) {
   const maybeName = createNamer({
     pi,
     model: () => config.titleModel,
+    // A bare model id is ambiguous across providers; prefer the one this session
+    // already uses, then the configured default.
+    prefer: () => [ctx?.model?.provider ?? "", readDefaultProvider(agentDir)].filter(Boolean),
     onNamed: (name) => {
       self.name = name;
       publish();
+    },
+    onBroken: (reason) => {
+      // Tell the user once, in the transcript, instead of failing invisibly.
+      if (!ctx?.hasUI) return;
+      ctx.ui.notify(`Session naming is off: ${reason}. Fix titleModel in ${configPath(agentDir)}.`, "warning");
     },
   });
 
