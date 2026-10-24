@@ -122,3 +122,17 @@ export function dedupeLive(records: RegistryRecord[]): RegistryRecord[] {
   }
   return [...byFile.values(), ...loose];
 }
+
+/**
+ * Drop closed rows whose session is also running.
+ *
+ * The closed index is a scan of every session file on disk, which necessarily
+ * includes the files of sessions that are running right now. Without this, a
+ * session appears twice: once under Idle and once under Closed.
+ */
+export function withoutLiveDuplicates(closed: SessionRow[], live: SessionRow[]): SessionRow[] {
+  if (live.length === 0) return closed;
+  const running = new Set(live.map((row) => row.sessionFile).filter((file): file is string => Boolean(file)));
+  if (running.size === 0) return closed;
+  return closed.filter((row) => !row.sessionFile || !running.has(row.sessionFile));
+}

@@ -15,7 +15,7 @@ import { SessionsPanel } from "./panel.ts";
 import { loadClosed, insertClosed, rowFromInfo, type ClosedIndex } from "./closed.ts";
 import { configPath, readConfig, writeConfigExample } from "./config.ts";
 import { createNamer } from "./naming.ts";
-import { dedupeLive, ownPane, rowFromRecord } from "./live.ts";
+import { dedupeLive, ownPane, rowFromRecord, withoutLiveDuplicates } from "./live.ts";
 import { readRegistry, registryDir, removeRecord, writeRecord, type RegistryRecord } from "./registry.ts";
 import type { SessionRow } from "./types.ts";
 
@@ -149,7 +149,8 @@ export default function (pi: ExtensionAPI) {
   // ── rows ────────────────────────────────────────────────────────────────────
   const rows = (): SessionRow[] => {
     const { live } = readRegistry(registry);
-    return [...dedupeLive(live).map(rowFromRecord), ...(closedIndex?.rows ?? [])];
+    const liveRows = dedupeLive(live).map(rowFromRecord);
+    return [...liveRows, ...withoutLiveDuplicates(closedIndex?.rows ?? [], liveRows)];
   };
 
   // ── panel ───────────────────────────────────────────────────────────────────

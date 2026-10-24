@@ -18,7 +18,7 @@ import { parseSearch, matchSearch } from "../extension/search.ts";
 import { cleanTitle, firstUserText, createNamer, resolveModel } from "../extension/naming.ts";
 import { spinnerGlyphAt as currentGlyphForTest } from "../extension/panel.ts";
 import { readConfig } from "../extension/config.ts";
-import { dedupeLive } from "../extension/live.ts";
+import { dedupeLive, withoutLiveDuplicates } from "../extension/live.ts";
 import { mkdtempSync as mkdtemp2, writeFileSync as writeFile2 } from "node:fs";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
@@ -499,4 +499,21 @@ test("the frame key changes as the spinner moves", () => {
   } finally {
     Date.now = realNow;
   }
+});
+
+test("a running session never also appears as closed", () => {
+  const running = "/sessions/running.jsonl";
+  const live = [row({ key: "live:1", state: "idle", sessionFile: running })];
+  const closed = [
+    row({ key: `closed:${running}`, state: "closed", sessionFile: running }),
+    row({ key: "closed:/sessions/old.jsonl", state: "closed", sessionFile: "/sessions/old.jsonl" }),
+  ];
+  const out = withoutLiveDuplicates(closed, live);
+  assert.equal(out.length, 1, "only the session that is not running stays closed");
+  assert.equal(out[0]!.sessionFile, "/sessions/old.jsonl");
+});
+
+test("closed rows are untouched when nothing is running", () => {
+  const closed = [row({ key: "closed:/a", state: "closed", sessionFile: "/a" })];
+  assert.deepEqual(withoutLiveDuplicates(closed, []), closed);
 });
