@@ -101,3 +101,24 @@ function lastSegment(path: string): string {
   const parts = path.split("/").filter(Boolean);
   return parts.at(-1) ?? path;
 }
+
+/**
+ * Collapse records that point at the same session file.
+ *
+ * Two processes can hold one session file: reopening a closed session starts a new
+ * pi on it while the old one is still alive. That is one session, so it gets one
+ * row, and the most recently active process represents it.
+ */
+export function dedupeLive(records: RegistryRecord[]): RegistryRecord[] {
+  const byFile = new Map<string, RegistryRecord>();
+  const loose: RegistryRecord[] = [];
+  for (const record of records) {
+    if (!record.sessionFile) {
+      loose.push(record);
+      continue;
+    }
+    const existing = byFile.get(record.sessionFile);
+    if (!existing || existing.updatedAt < record.updatedAt) byFile.set(record.sessionFile, record);
+  }
+  return [...byFile.values(), ...loose];
+}

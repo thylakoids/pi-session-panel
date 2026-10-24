@@ -16,7 +16,9 @@ import { readRegistry, writeRecord, removeRecord } from "../extension/registry.t
 import { insertClosed } from "../extension/closed.ts";
 import { parseSearch, matchSearch } from "../extension/search.ts";
 import { cleanTitle, firstUserText, createNamer, resolveModel } from "../extension/naming.ts";
+import { spinnerGlyphAt as currentGlyphForTest } from "../extension/panel.ts";
 import { readConfig } from "../extension/config.ts";
+import { dedupeLive } from "../extension/live.ts";
 import { mkdtempSync as mkdtemp2, writeFileSync as writeFile2 } from "node:fs";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
@@ -450,4 +452,51 @@ test("a broken model config is reported once, not on every prompt", async () => 
   await namer(context);
   assert.equal(reasons.length, 1, "one warning per process is enough");
   assert.match(reasons[0]!, /no model/);
+});
+
+test("two processes on one session file collapse into one row", () => {
+  const file = "/sessions/one.jsonl";
+  const records = [
+    { pid: 1, cwd: "/w", state: "idle" as const, updatedAt: 100, sessionFile: file },
+    { pid: 2, cwd: "/w", state: "working" as const, updatedAt: 300, sessionFile: file },
+    { pid: 3, cwd: "/w", state: "idle" as const, updatedAt: 50, sessionFile: "/sessions/two.jsonl" },
+    // A process that has not written a file yet cannot be matched to anything.
+    { pid: 4, cwd: "/w", state: "idle" as const, updatedAt: 10 },
+  ];
+  const out = dedupeLive(records);
+  assert.equal(out.length, 3, "one row per session file, plus the fileless one");
+  assert.equal(out.filter((r) => r.sessionFile === file).length, 1, "no duplicate");
+  assert.equal(out.find((r) => r.sessionFile === file)!.pid, 2, "the most recent process wins");
+  assert.ok(out.some((r) => r.pid === 4), "a record without a file is kept");
+});
+
+test("the spinner advances with time", () => {
+  // The panel once shipped with a hard-coded frame index, which froze the
+  // animation at a single glyph. Ask for glyphs across one full period.
+  const glyphs = new Set<string>();
+  for (let ms = 0; ms <= 2000; ms += 50) {
+    glyphs.add(currentGlyphForTest(ms));
+  }
+  assert.ok(glyphs.size >= 5, `expected the whole ladder, saw ${[...glyphs].join("")}`);
+});
+
+test("the frame key changes as the spinner moves", () => {
+  const rows = [row({ state: "working", workingSince: 1_700_000_000_000, updatedAt: 1_700_000_000_000 })];
+  const { instance } = panel(() => rows);
+  const realNow = Date.now;
+  try {
+    const base = 1_700_000_000_000;
+    Date.now = () => base;
+    instance.render(theme, 100, 20);
+    const seen = new Set<string>();
+    for (let ms = 0; ms <= 2000; ms += 50) {
+      Date.now = () => base + ms;
+      if (instance.needsRedraw(theme, 100, 20)) {
+        seen.add(instance.render(theme, 100, 20).join("\n"));
+      }
+    }
+    assert.ok(seen.size >= 5, "a working row must produce several distinct frames");
+  } finally {
+    Date.now = realNow;
+  }
 });

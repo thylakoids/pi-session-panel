@@ -100,8 +100,13 @@ function cosineEase(elapsed: number, period: number): number {
 }
 
 /** Claude Code's `Zn`: quantise the eased value onto the frame ladder. */
+/** Exported for tests: the glyph at a given time, ignoring per-row phase. */
+export function spinnerGlyphAt(elapsed: number): string {
+  return spinnerFrame(elapsed);
+}
+
 function spinnerFrame(elapsed: number): string {
-  const index = 3;
+  const index = Math.round(cosineEase(elapsed, SPINNER_PERIOD_MS) * (SPINNER_FRAMES.length - 1));
   return SPINNER_CYCLE[index % SPINNER_CYCLE.length]!;
 }
 
@@ -421,12 +426,23 @@ export class SessionsPanel {
       this.confirmation ? `${this.confirmation.row.key}:${this.confirmation.confirm}` : "",
       this.error ?? "",
       this.windowStart,
-      // Only working rows animate, so only their glyphs belong in the key.
-      spinnerFrame(at + rowPhase("working-phase")),
+      // Every working row animates on its own phase, so the key has to cover all
+      // of them. Using one fixed phase here made the key describe a frame that was
+      // never drawn, and the cache then suppressed the animation entirely.
+      this.workingGlyphs(at),
       // Ages change at most once a second, so a second is the granularity.
       Math.floor(at / 1000),
       this.dataSignature(),
     ].join("\u0000");
+  }
+
+  /** The glyph each working row would draw right now, in row order. */
+  private workingGlyphs(at: number): string {
+    let out = "";
+    for (const row of this.rowsForFrame()) {
+      if (row.state === "working") out += spinnerFrame(at + rowPhase(row.key));
+    }
+    return out;
   }
 
   /**
