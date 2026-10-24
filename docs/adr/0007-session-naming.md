@@ -32,4 +32,4 @@
 
 `before_agent_start` 触发时，当前这条 prompt 还没有进入 branch，所以文本必须从 `event.prompt` 传入；`session_start` 那条从 branch 读。两处共用同一个 `firstUserText`。
 
-模型 id 可能自带斜杠，所以配置写成 `provider/model` 时只按第一个斜杠切分，其余部分原样作为 model id。解析不到就在会话里提示一次，不做任何猜测。
+配置必须写全 `provider/model`。model id 可能自带斜杠，所以只按第一个斜杠切分，其余部分原样作为 model id。解析不到就在会话里提示一次，不做任何猜测，也不接受简写。

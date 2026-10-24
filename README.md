@@ -24,23 +24,17 @@ pi install ~/Agent/pi-session-panel
 
 ## 配置
 
-`~/.pi/agent/session-panel/config.json`，首次启动自动生成（空文件）。
-
-写一行 `provider/model`：
-
-```
-your-provider/your-model
-```
-
-也接受 JSON：
+`~/.pi/agent/session-panel/config.json`，首次启动自动生成 `{}\n`。
 
 ```json
-{ "titleModel": "your-provider/your-model" }
+{
+  "titleModel": "your-provider/your-model"
+}
 ```
 
-**留空就不起名** —— 插件不带默认值，用哪个模型由你决定。
+必须写全 `provider/model`。model id 本身可能带斜杠，所以只按第一个斜杠切分 provider。
 
-provider 前缀必须写全。model id 本身可能带斜杠，所以只按第一个斜杠切分 provider。写错了会在会话里提示一次，告诉你解析不到。
+**留空就不起名** —— 插件不带默认值，用哪个模型由你决定。
 
 起名规则：会话没有名字、且已经有 user 消息时，生成一个短标题写进 `session_info`。有名字就不再改。
 

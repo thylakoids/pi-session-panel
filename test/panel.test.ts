@@ -411,21 +411,23 @@ test("an empty spec is reported", () => {
   assert.ok("error" in result);
 });
 
-test("config accepts a bare string or the object form", () => {
+test("config is JSON, and only titleModel is read", () => {
   const dir = mkdtemp2(join(tmpdir(), "panel-config-"));
   mkdirSync(join(dir, "session-panel"), { recursive: true });
+  const write = (text: string) => writeFile2(join(dir, "session-panel", "config.json"), text);
 
-  writeFile2(join(dir, "session-panel", "config.json"), "model-a\n");
-  assert.deepEqual(readConfig(dir), { titleModel: "model-a" }, "bare string");
+  write('{ "titleModel": "p/model-a" }');
+  assert.deepEqual(readConfig(dir), { titleModel: "p/model-a" }, "object form");
 
-  writeFile2(join(dir, "session-panel", "config.json"), '{ "titleModel": "x/y" }');
-  assert.deepEqual(readConfig(dir), { titleModel: "x/y" }, "object form");
+  write("");
+  assert.deepEqual(readConfig(dir), {}, "empty file means off");
 
-  writeFile2(join(dir, "session-panel", "config.json"), "");
-  assert.deepEqual(readConfig(dir), {}, "empty means off");
-
-  writeFile2(join(dir, "session-panel", "config.json"), "{ broken json");
+  write("{ broken json");
   assert.deepEqual(readConfig(dir), {}, "broken json means off, not a crash");
+
+  // A bare string is not JSON and must not be accepted.
+  write("p/model-a");
+  assert.deepEqual(readConfig(dir), {}, "a bare string is not a config");
 });
 
 test("a broken model config is reported once, not on every prompt", async () => {
