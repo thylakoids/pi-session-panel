@@ -12,7 +12,7 @@ import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
 import { createGestureEditor } from "./editor.ts";
 import { SessionsPanel } from "./panel.ts";
-import { loadClosed, insertClosed, rowFromInfo, type ClosedIndex } from "./closed.ts";
+import { closedScanDir, loadClosed, insertClosed, rowFromInfo, type ClosedIndex } from "./closed.ts";
 import { configPath, readConfig, writeConfigExample } from "./config.ts";
 import { createNamer } from "./naming.ts";
 import { dedupeLive, ownPane, rowFromRecord, withoutLiveDuplicates } from "./live.ts";
@@ -126,7 +126,7 @@ export default function (pi: ExtensionAPI) {
   const ensureClosedLoaded = (context: ExtensionContext) => {
     if (closedIndex || loading) return;
     loading = true;
-    const dir = context.sessionManager.getSessionDir();
+    const dir = closedScanDir(context.sessionManager);
     void loadClosed(dir)
       .then((rows) => {
         closedIndex = { rows, loadedAt: Date.now() };
@@ -141,7 +141,7 @@ export default function (pi: ExtensionAPI) {
 
   /** Rescan on demand (the R key). */
   const rescan = async (context: ExtensionContext): Promise<void> => {
-    const dir = context.sessionManager.getSessionDir();
+    const dir = closedScanDir(context.sessionManager);
     closedIndex = { rows: await loadClosed(dir), loadedAt: Date.now() };
   };
 

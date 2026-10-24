@@ -13,7 +13,7 @@ import { join } from "node:path";
 
 import { SessionsPanel } from "../extension/panel.ts";
 import { readRegistry, writeRecord, removeRecord } from "../extension/registry.ts";
-import { insertClosed } from "../extension/closed.ts";
+import { closedScanDir, insertClosed } from "../extension/closed.ts";
 import { parseSearch, matchSearch } from "../extension/search.ts";
 import { cleanTitle, firstUserText, createNamer, resolveModel } from "../extension/naming.ts";
 import { spinnerGlyphAt as currentGlyphForTest } from "../extension/panel.ts";
@@ -517,3 +517,24 @@ test("closed rows are untouched when nothing is running", () => {
   const closed = [row({ key: "closed:/a", state: "closed", sessionFile: "/a" })];
   assert.deepEqual(withoutLiveDuplicates(closed, []), closed);
 });
+
+test("the closed scan covers every project when the session lives in the default dir", () => {
+  // Regression: passing getSessionDir() unconditionally narrowed the scan to the
+  // current project, where the only file is the running session. The list came
+  // out empty, and an empty section draws no header, so Closed vanished.
+  const manager = { getSessionDir: () => "/agent/sessions/--project--", usesDefaultSessionDir: () => true };
+  assert.equal(closedScanDir(manager), undefined, "undefined means listAll() scans every project");
+});
+
+test("the closed scan stays inside an explicit session dir", () => {
+  const manager = { getSessionDir: () => "/elsewhere/sessions", usesDefaultSessionDir: () => false };
+  assert.equal(closedScanDir(manager), "/elsewhere/sessions", "pi -r scans only that dir; so do we");
+});
+
+test("a session manager without the probe still scans every project", () => {
+  // ReadonlySessionManager does not declare usesDefaultSessionDir, so the panel
+  // must not assume it exists; the safe answer is the wider scan.
+  const manager = { getSessionDir: () => "/agent/sessions/--project--" };
+  assert.equal(closedScanDir(manager), undefined);
+});
+

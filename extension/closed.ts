@@ -15,6 +15,32 @@ export interface ClosedIndex {
   loadedAt: number;
 }
 
+/**
+ * The session manager, as far as the scan scope is concerned.
+ *
+ * `usesDefaultSessionDir()` exists on pi's `SessionManager` but is not part of the
+ * readonly view an extension receives, so it is optional here and probed at runtime.
+ */
+export interface SessionDirSource {
+  getSessionDir(): string;
+  usesDefaultSessionDir?: () => boolean;
+}
+
+/**
+ * Which directory the closed scan covers.
+ *
+ * `pi -r` scans every project when the session lives in the default directory, and
+ * only that directory when `--session-dir` moved it. The panel has to make the same
+ * choice. Passing `getSessionDir()` unconditionally narrows the scan to the current
+ * project, where the only session file is usually the one running right now: the
+ * list then comes out empty, which is exactly what a closed list must not do.
+ */
+export function closedScanDir(source: SessionDirSource): string | undefined {
+  // Without the probe, fall back to every project: that is what the panel promises.
+  if (typeof source.usesDefaultSessionDir !== "function") return undefined;
+  return source.usesDefaultSessionDir() ? undefined : source.getSessionDir();
+}
+
 /** First line of a message, collapsed, so a pasted blob cannot dominate the list. */
 function firstLine(text: string, limit = 100): string {
   const line = text.split("\n").find((part) => part.trim().length > 0) ?? text;
