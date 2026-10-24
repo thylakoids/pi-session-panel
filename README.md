@@ -48,18 +48,26 @@ pi install ~/Agent/pi-session-panel
 | Idle | 注册表里 `state: "idle"` 的进程 | 优雅退出（SIGTERM），立刻落入 Closed |
 | Closed | `SessionManager.listAll()`，与 `pi -r` 同源 | 删除磁盘上的会话文件（需确认） |
 
+## 显示名
+
+会话没有名字时，回退到 `pi -r` 用的那个名字：有 name 用 name，否则取首条 user 消息。两样都没有（刚开、还没说话）就显示 `(new session)`，不用所在目录的名字冒充。
+
 ## 按键
 
 | 键 | 动作 |
 |---|---|
-| `j` / `k` | 上下移动 |
+| `j` / `k`、`↑` / `↓` | 上下移动。搜索中方向键选结果，`j` / `k` 是输入字符 |
 | `gg` / `G` | 跳到第一行 / 最后一行 |
 | `Enter` | Working、Idle：跳到那个 tmux pane；Closed：恢复到 tmux session `pi-sessions` 的新窗口 |
 | `X` | 见上表 |
-| `r` | 改名（写入 `session_info`，与 `pi -r` 共享） |
-| `/` | 搜索（与 `pi -r` 同一套：模糊词、`"短语"`、`re:正则`） |
+| `r` | 改名。`←` `→` `Home` `End` 移动光标，`Enter` 保存，`Esc` 取消 |
+| `/` | 搜索（与 `pi -r` 同一套：模糊词、`"短语"`、`re:正则`）。`↑` `↓` 选结果，`Enter` 保留过滤，`Esc` 清空 |
+| `?` | 显示完整按键列表，任意键关闭 |
 | `R` | 重新扫描 closed 分区 |
-| `q` / `Esc` / `←` | 关闭面板 |
+| `q` / `Esc` | 关闭面板 |
+| `←`（仅在列表里） | 关闭面板。在搜索或改名框里它是光标左移，不会关面板 |
+
+面板底部那行提示会随模式变化：搜索时说 `↑ ↓ pick a result`，改名时说 `← → move the caret`，列表里才提 `←` 关闭。
 
 ## 它看不见什么
 
@@ -72,8 +80,10 @@ spinner 每 200ms 才换一帧，面板只在那一刻重绘，其余 tick 由�
 | | 成本 |
 |---|---|
 | 缓存命中 | 7 µs |
-| 完整重建（1165 条 closed） | 0.75 ms |
-| 重绘频率 | 每 200 ms 一次 |
+| 完整重建（186 条 closed） | 0.75 ms |
+| 重绘频率 | spinner 每 200 ms 一步 |
+| closed 冷扫描 | ~1.5 s（仅首次，之后读缓存） |
+| closed 增量扫描 | ~11 ms |
 
 ## 开发
 
@@ -81,7 +91,7 @@ spinner 每 200ms 才换一帧，面板只在那一刻重绘，其余 tick 由�
 npm test
 ```
 
-38 个测试，每一个都用「先埋 bug、确认测试变红」验证过，没有装饰性的测试。
+53 个测试，每一个都用「先埋 bug、确认测试变红」验证过，没有装饰性的测试。
 
 ## 文档
 
@@ -95,3 +105,6 @@ npm test
 - [docs/adr/0007](./docs/adr/0007-session-naming.md) — 自动起名：一个检查，两个触发点
 - [docs/adr/0008](./docs/adr/0008-title-context-follows-claude-code.md) — 起名的 context 对齐 Claude Code
 - [docs/adr/0009](./docs/adr/0009-one-spinner-clock.md) — 所有 working 行共用一个 spinner 时钟
+- [docs/adr/0010](./docs/adr/0010-closed-hides-subagent-sessions.md) — closed 不显示 subagent 会话
+- [docs/adr/0011](./docs/adr/0011-closed-index-cached-on-disk.md) — closed 索引缓存到磁盘
+- [docs/adr/0012](./docs/adr/0012-frame-key-covers-every-visible-state.md) — 每一帧先算完整再取 key

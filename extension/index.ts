@@ -6,12 +6,14 @@
  */
 import { execFileSync } from "node:child_process";
 import { rm } from "node:fs/promises";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
 import { createGestureEditor } from "./editor.ts";
 import { SessionsPanel } from "./panel.ts";
-import { closedScanDir, loadClosed, insertClosed, type ClosedIndex } from "./closed.ts";
+import { closedScanDir, insertClosed, scanClosed, type ClosedIndex } from "./closed.ts";
+import { readClosedCache, writeClosedCache, type CachedClosedRow } from "./closed-cache.ts";
 import { configPath, readConfig, writeConfigExample } from "./config.ts";
 import { createNamer } from "./naming.ts";
 import { dedupeLive, ownPane, rowFromRecord, withoutLiveDuplicates } from "./live.ts";
@@ -105,30 +107,75 @@ export default function (pi: ExtensionAPI) {
   };
 
   // ── closed index ────────────────────────────────────────────────────────────
-  /** Null until the first async load finishes. */
+  /**
+   * The closed rows. A scan of every session file costs ~1.6s here, so the list
+   * comes from the cache file first and the scan only refreshes what changed.
+   * See docs/adr/0011.
+   */
   let closedIndex: ClosedIndex | null = null;
-  let loading = false;
+  let closedCache: CachedClosedRow[] = [];
+  /** The scan in flight, so a second request joins it instead of being dropped. */
+  let scanInFlight: Promise<void> | null = null;
+  /** Whether the current closedIndex came from a real scan, not the cache. */
+  let fresh = false;
 
+  /** The cache file, once per process: the path never changes. */
+  const cachePath = join(agentDir, "session-panel", "closed-cache.json");
+
+  /** Guess at what the scan would produce, straight from the last run. */
+  const seedFromCache = (): SessionRow[] => {
+    const cache = readClosedCache(cachePath);
+    if (!cache) return [];
+    closedCache = cache.rows;
+    return cache.rows.map((entry) => entry.row);
+  };
+
+  /**
+   * Scan, publish, cache.
+   *
+   * The pass over unchanged directories costs ~13ms because each file only
+   * contributes a stamp; only the directories with a new or edited file are
+   * handed back to pi to re-read.
+   */
+  const runScan = (context: ExtensionContext): Promise<void> => {
+    // Joining the scan in flight is what makes R work while the first load is
+    // still running: dropping the request would leave the user with a refresh
+    // key that silently does nothing.
+    if (scanInFlight) return scanInFlight;
+    scanInFlight = (async () => {
+      const dir = closedScanDir(context.sessionManager);
+      const result = await scanClosed(dir, closedCache);
+      closedIndex = { rows: result.rows, loadedAt: Date.now() };
+      closedCache = result.cache;
+      fresh = true;
+      writeClosedCache(cachePath, result.cache);
+    })().finally(() => {
+      scanInFlight = null;
+    });
+    return scanInFlight;
+  };
+
+  /**
+   * Make the closed section usable as early as possible.
+   *
+   * The cache is read synchronously so the first frame already has rows, then the
+   * incremental scan replaces them. Without the cache the section is empty for as
+   * long as the scan takes, which is what made opening a fresh pi feel slow.
+   */
   const ensureClosedLoaded = (context: ExtensionContext) => {
-    if (closedIndex || loading) return;
-    loading = true;
-    const dir = closedScanDir(context.sessionManager);
-    void loadClosed(dir)
-      .then((rows) => {
-        closedIndex = { rows, loadedAt: Date.now() };
-      })
-      .catch(() => {
-        // Leave it null; the next panel open retries.
-      })
-      .finally(() => {
-        loading = false;
-      });
+    if (!closedIndex) {
+      const seeded = seedFromCache();
+      if (seeded.length > 0) closedIndex = { rows: seeded, loadedAt: Date.now() };
+    }
+    if (fresh) return;
+    void runScan(context).catch(() => {
+      // The cache, if any, stays on screen; the next open retries.
+    });
   };
 
   /** Rescan on demand (the R key). */
   const rescan = async (context: ExtensionContext): Promise<void> => {
-    const dir = closedScanDir(context.sessionManager);
-    closedIndex = { rows: await loadClosed(dir), loadedAt: Date.now() };
+    await runScan(context);
   };
 
   // ── rows ────────────────────────────────────────────────────────────────────
@@ -164,7 +211,6 @@ export default function (pi: ExtensionAPI) {
           const panel = new SessionsPanel({
             rows,
             close,
-            notify: (message, type) => context.ui.notify(message, type),
             actions: {
               focus: (row) => focusPane(row, context),
               reopen: (row) => restore(row),
@@ -191,7 +237,10 @@ export default function (pi: ExtensionAPI) {
               return panel.render(theme, columns, height());
             },
             handleInput: (data: string) => {
-              if (matchesKey(data, "left")) {
+              // The left-arrow gesture closes the panel, but a text field is using
+              // the arrows to move a caret. Closing out from under someone typing a
+              // name is the worst possible answer to that key.
+              if (matchesKey(data, "left") && !panel.isEditingText()) {
                 close();
                 tui.requestRender();
                 return;
@@ -315,7 +364,13 @@ const RESTORE_SESSION = "pi-sessions";
     // A live session's name lives in its own process; tell it, so the next frame
     // shows the new name instead of the one it registered at startup.
     const pid = Number(row.key.replace("live:", ""));
-    if (Number.isInteger(pid) && pid !== self.pid) {
+    if (pid === self.pid) {
+      // Renaming the session you are sitting in: nothing else will publish this,
+      // and skipping it left the row showing the old name forever.
+      self.name = next;
+      self.updatedAt = Date.now();
+      publish();
+    } else if (Number.isInteger(pid)) {
       const live = readRegistry(registry).live.find((r) => r.pid === pid);
       if (live) {
         try {

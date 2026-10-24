@@ -44,7 +44,6 @@ export interface PanelOptions {
   actions: PanelActions;
   /** Called when an action means "you left the panel". */
   close(): void;
-  notify(message: string, type?: "info" | "warning" | "error"): void;
 }
 
 type Section = "working" | "idle" | "closed";
@@ -163,9 +162,22 @@ export class SessionsPanel {
   private readonly options: PanelOptions;
   private selected: string | null = null;
   private query = "";
+  private queryCursor = 0;
   private searching = false;
   private confirmation: Confirmation | null = null;
-  private rename: { row: SessionRow; draft: string } | null = null;
+  /** The rename draft and its caret, which the arrows move like any text field. */
+  private rename: { row: SessionRow; draft: string; cursor: number } | null = null;
+  /** The key list, toggled with ?. */
+  private help = false;
+  /**
+   * Bumped by anything the panel itself changes about a row.
+   *
+   * The data fingerprint samples rows, and a rename can change a name without
+   * changing any number it samples (two names of equal length, or a row past the
+   * sample window). A counter the panel controls makes those edits visible
+   * exactly, with no extra work per frame. See docs/adr/0012.
+   */
+  private revision = 0;
   private windowStart = 0;
   private error: string | null = null;
   private pendingG = false;
@@ -217,11 +229,29 @@ export class SessionsPanel {
     return node?.row ?? null;
   }
 
+  /**
+   * Keep a selection that still exists; otherwise land on the row that took the
+   * old one's place.
+   *
+   * Falling back to the first row teleported the user to the top of the list when
+   * a row moved between sections (exit an idle session and it becomes closed) or
+   * was deleted. Remembering the index keeps the eye where it was.
+   */
   private clampSelection(): void {
     const rows = this.selectable();
     if (rows.some((n) => n.id === this.selected)) return;
-    this.selected = rows[0]?.id ?? null;
-    this.windowStart = 0;
+    const at = Math.max(0, Math.min(this.selectedIndex, rows.length - 1));
+    this.selected = rows[at]?.id ?? null;
+    if (rows.length === 0) this.windowStart = 0;
+  }
+
+  /** The index the selection had last frame, so a lost selection can be re-anchored. */
+  private selectedIndex = 0;
+
+  /** Recompute the remembered index from the current row set. */
+  private rememberSelection(): void {
+    const at = this.selectable().findIndex((n) => n.id === this.selected);
+    if (at >= 0) this.selectedIndex = at;
   }
 
   private move(delta: number): void {
@@ -229,11 +259,13 @@ export class SessionsPanel {
     const index = rows.findIndex((n) => n.id === this.selected);
     const next = Math.max(0, Math.min(rows.length - 1, (index < 0 ? 0 : index) + delta));
     this.selected = rows[next]?.id ?? null;
+    this.rememberSelection();
   }
 
   private jumpToEdge(edge: "first" | "last"): void {
     const rows = this.selectable();
     this.selected = (edge === "first" ? rows[0] : rows[rows.length - 1])?.id ?? null;
+    this.rememberSelection();
   }
 
   /** X means three different things. See docs/adr/0002. */
@@ -243,8 +275,10 @@ export class SessionsPanel {
     this.error = null;
     try {
       if (row.state === "working") await this.options.actions.interrupt(row);
-      else if (row.state === "idle") await this.options.actions.exit(row);
-      else this.confirmation = { row, confirm: false };
+      else if (row.state === "idle") {
+        await this.options.actions.exit(row);
+        this.revision++;
+      } else this.confirmation = { row, confirm: false };
     } catch (error) {
       this.error = error instanceof Error ? error.message : String(error);
     }
@@ -256,14 +290,93 @@ export class SessionsPanel {
     if (!pending || !choice) return;
     try {
       await this.options.actions.remove(pending.row);
-      this.selected = null;
+      // The row is gone; let clampSelection land on its neighbour rather than the
+      // top of the list.
+      this.revision++;
       this.clampSelection();
     } catch (error) {
       this.error = error instanceof Error ? error.message : String(error);
     }
   }
 
+  /**
+   * A text field's response to one key, or undefined when the key is not text.
+   *
+   * The search box and the rename box are the same widget with a different label,
+   * so they share this: arrows move the caret, backspace deletes before it, delete
+   * deletes at it, home/end jump. Sharing it is what keeps the two from drifting —
+   * the rename box had no caret at all, and the search box had no arrow handling.
+   */
+  private editText(value: string, cursor: number, data: string): { value: string; cursor: number } | undefined {
+    // The caret moves over code points, never UTF-16 units: one backspace on an
+    // emoji must remove the emoji, not half of its surrogate pair.
+    const chars = [...value];
+    const before = [...value.slice(0, cursor)].length;
+    const splice = (from: number, remove: number, insert = ""): { value: string; cursor: number } => {
+      const out = [...chars.slice(0, from), ...(insert ? [insert] : []), ...chars.slice(from + remove)];
+      const next = out.join("");
+      return { value: next, cursor: [...out.slice(0, from + (insert ? 1 : 0))].join("").length };
+    };
+    if (matchesKey(data, "left")) return before === 0 ? { value, cursor } : splice(before - 1, 0);
+    if (matchesKey(data, "right")) return before >= chars.length ? { value, cursor } : splice(before + 1, 0);
+    if (matchesKey(data, "home") || data === "\u0001") return { value, cursor: 0 };
+    if (matchesKey(data, "end") || data === "\u0005") return { value, cursor: value.length };
+    if (matchesKey(data, "backspace")) return before === 0 ? { value, cursor } : splice(before - 1, 1);
+    if (matchesKey(data, "delete")) return before >= chars.length ? { value, cursor } : splice(before, 1);
+    // A printable key is inserted at the caret, not appended: the caret is the
+    // point the user is looking at, and an edit must land there.
+    if (data.length >= 1 && !/^[\u0000-\u001f\u007f]+$/.test(data)) {
+      return splice(before, 0, data);
+    }
+    return undefined;
+  }
+
+  /** The key list. One place, so a new key cannot be added without being listed. */
+  private static readonly KEY_LIST: [string, string][] = [
+    ["j / k  ↓ / ↑", "move the selection"],
+    ["gg / G", "first / last"],
+    ["enter", "working, idle: jump to its tmux pane; closed: reopen"],
+    ["X", "working: interrupt; idle: exit; closed: delete"],
+    ["r", "rename this session"],
+    ["/", "search: words, \"phrase\", re:regex"],
+    ["esc", "searching: clear the query; otherwise close the panel"],
+    ["R", "rescan the closed section"],
+    ["?", "this list"],
+    ["q", "close the panel"],
+  ];
+
+  /**
+   * The hint row, which must say what the keys do *in this mode*.
+   *
+   * A single static line was wrong twice over: it never mentioned r or X, and
+   * inside search or rename the arrow keys do not close the panel at all.
+   */
+  private hint(): string {
+    if (this.help) return "any key to close this list";
+    if (this.rename) return "enter saves  ·  esc cancels  ·  ← → move the caret";
+    if (this.confirmation) return "j / k choose  ·  enter confirm  ·  esc cancel";
+    if (this.searching) return "↑ ↓ pick a result  ·  enter keep  ·  esc clear";
+    const filtered = this.query ? "  ·  esc clears the filter" : "";
+    return `j / k move  ·  enter open  ·  X stop  ·  r rename  ·  / search  ·  ? keys${filtered}`;
+  }
+
+  /** The body of the help screen. */
+  private helpBody(theme: any, inner: number): string[] {
+    const width = Math.max(8, ...SessionsPanel.KEY_LIST.map(([keys]) => visibleWidth(keys)));
+    return SessionsPanel.KEY_LIST.map(([keys, action]) =>
+      theme.fg("accent", padEndVisible(keys, width)) + "  " + theme.fg("text", action),
+    ).map((line) => truncateToWidth(line, inner));
+  }
+
   async handleInput(data: string): Promise<void> {
+    // While the key list is open it is the only thing that reacts, and any key
+    // closes it: reading the list and then hunting for the same key again would
+    // be an extra step for no reason.
+    if (this.help) {
+      this.help = false;
+      return;
+    }
+
     if (this.rename) {
       if (matchesKey(data, "escape")) {
         this.rename = null;
@@ -271,28 +384,37 @@ export class SessionsPanel {
       }
       if (data === "\r" || data === "\n" || matchesKey(data, "return")) {
         const { row, draft } = this.rename;
-        this.rename = null;
         const next = draft.trim();
-        if (!next || next === row.name) return;
+        // An empty name is refused rather than closing the box: a silent no-op
+        // looks like the save worked, and the user walks away believing it did.
+        if (!next) {
+          this.error = "A session needs a name.";
+          return;
+        }
+        this.rename = null;
+        if (next === row.name) return;
         try {
           await this.options.actions.rename(row, next);
+          // The name is in the row set now, but the data fingerprint samples only
+          // numbers. This makes the change visible on the very next frame.
+          this.revision++;
         } catch (error) {
           this.error = error instanceof Error ? error.message : String(error);
         }
         return;
       }
-      if (matchesKey(data, "backspace")) {
-        this.rename!.draft = this.rename!.draft.slice(0, -1);
-        return;
+      const edited = this.editText(this.rename.draft, this.rename.cursor, data);
+      if (edited) {
+        this.rename.draft = edited.value;
+        this.rename.cursor = edited.cursor;
       }
-      if (data.length === 1 && data >= " ") this.rename!.draft += data;
       return;
     }
 
     if (this.confirmation) {
-      if (matchesKey(data, "escape")) {
+      if (matchesKey(data, "escape") || matchesKey(data, "left")) {
         this.confirmation = null;
-      } else if (data === "j" || matchesKey(data, "down")) {
+      } else if (data === "j" || matchesKey(data, "down") || data === "\t" || matchesKey(data, "right")) {
         this.confirmation.confirm = true;
       } else if (data === "k" || matchesKey(data, "up")) {
         this.confirmation.confirm = false;
@@ -305,6 +427,7 @@ export class SessionsPanel {
     if (this.searching) {
       if (matchesKey(data, "escape")) {
         this.query = "";
+        this.queryCursor = 0;
         this.searching = false;
         this.selected = null;
         this.clampSelection();
@@ -314,17 +437,36 @@ export class SessionsPanel {
         this.searching = false;
         return;
       }
-      if (matchesKey(data, "backspace")) {
-        this.query = this.query.slice(0, -1);
-      } else if (data.length === 1 && data >= " ") {
-        this.query += data;
+      // The arrows belong to the result list, not to the query: the query is
+      // typed, but the thing being chosen is a row. Swallowing them here is what
+      // made "search, then pick a result" impossible.
+      if (matchesKey(data, "up")) {
+        this.move(-1);
+        return;
       }
-      this.selected = null;
-      this.clampSelection();
+      if (matchesKey(data, "down")) {
+        this.move(1);
+        return;
+      }
+      const before = this.query;
+      const edited = this.editText(this.query, this.queryCursor, data);
+      if (edited) {
+        this.query = edited.value;
+        this.queryCursor = edited.cursor;
+      }
+      // Only re-anchor the selection when the result set can actually change.
+      if (this.query !== before) {
+        this.selected = null;
+        this.clampSelection();
+      }
       return;
     }
 
     this.error = null;
+    // The selection is normally set by the first render, but a key can arrive
+    // before it (the host renders once after the overlay mounts). Clamping here
+    // makes every mode work on the first keystroke.
+    this.clampSelection();
     const row = this.selectedRow();
 
     if (data === "q" || matchesKey(data, "escape")) {
@@ -367,6 +509,11 @@ export class SessionsPanel {
     }
     if (data === "/") {
       this.searching = true;
+      this.queryCursor = this.query.length;
+      return;
+    }
+    if (data === "?") {
+      this.help = true;
       return;
     }
     if (!row) return;
@@ -380,9 +527,24 @@ export class SessionsPanel {
       return;
     }
     if (data === "r") {
-      this.rename = { row, draft: row.name };
+      this.rename = { row, draft: row.name, cursor: row.name.length };
       return;
     }
+  }
+
+  /** The left-arrow gesture must not steal a key the panel is using as text. */
+  isEditingText(): boolean {
+    return this.searching || this.rename !== null || this.help || this.confirmation !== null;
+  }
+
+  /** The selected row key, for tests. */
+  selectedKey(): string | null {
+    return this.selected;
+  }
+
+  /** The message the panel is showing, for tests. */
+  errorText(): string | null {
+    return this.error;
   }
 
   private async act(run: () => void | Promise<void>): Promise<void> {
@@ -416,8 +578,13 @@ export class SessionsPanel {
       theme?.appearance ?? "",
       this.selected ?? "",
       this.query,
+      // The caret is visible, so it belongs in the key: moving it must redraw, or
+      // the cursor sits still until something else happens to change.
+      this.queryCursor,
       this.searching ? 1 : 0,
-      this.rename ? `${this.rename.row.key}:${this.rename.draft}` : "",
+      this.help ? 1 : 0,
+      this.revision,
+      this.rename ? `${this.rename.row.key}:${this.rename.draft}:${this.rename.cursor}` : "",
       this.confirmation ? `${this.confirmation.row.key}:${this.confirmation.confirm}` : "",
       this.error ?? "",
       this.windowStart,
@@ -474,15 +641,50 @@ export class SessionsPanel {
   render(theme: any, width: number, height: number): string[] {
     const at = Date.now();
     this.frameRows = null;
-    // Clamp before keying: clamping can change the selection, and a key computed
-    // from the pre-clamp state describes a frame that is never drawn.
+    this.innerWidth = Math.max(1, width - 4);
+    // Everything the key depends on is settled first. windowStart used to be
+    // written inside renderFrame, after the key was taken, so the stored key
+    // described the previous scroll position and every scroll cost a second,
+    // wasted rebuild. See docs/adr/0012.
     this.clampSelection();
+    this.scrollIntoView(height);
     const key = this.frameKey(theme, width, height, at);
     if (this.frameCache?.key === key) return this.frameCache.lines;
     const lines = this.renderFrame(theme, width, height, at);
     this.frameCache = { key, lines };
     return lines;
   }
+
+  /**
+   * How many body lines fit, and the wrapped error lines that eat into them.
+   *
+   * Two lines are the frame's top and bottom, one is the blank line under the top
+   * border, one is the hint row. Every row and header is exactly one line, so the
+   * budget is arithmetic.
+   */
+  private bodyBudget(height: number, inner: number): { budget: number; errorLines: string[] } {
+    const errorLines = this.error ? wrapTextWithAnsi(this.error, inner).slice(0, 2) : [];
+    return { budget: Math.max(1, height - 5 - errorLines.length), errorLines };
+  }
+
+  /**
+   * The first visible line, chosen so the selection is on screen.
+   *
+   * Runs before the frame key, so a scroll is part of the frame it describes.
+   */
+  private scrollIntoView(height: number): void {
+    const nodes = this.nodes();
+    const { budget } = this.bodyBudget(height, this.innerWidth);
+    const found = nodes.findIndex((n) => n.id === this.selected);
+    if (found >= 0) {
+      if (found < this.windowStart) this.windowStart = found;
+      else if (found >= this.windowStart + budget) this.windowStart = found - budget + 1;
+    }
+    this.windowStart = Math.max(0, Math.min(this.windowStart, Math.max(0, nodes.length - budget)));
+  }
+
+  /** Width last passed to render, so scrollIntoView can wrap the error line. */
+  private innerWidth = 76;
 
   private renderFrame(theme: any, width: number, height: number, at: number): string[] {
     const inner = Math.max(1, width - 4);
@@ -492,18 +694,26 @@ export class SessionsPanel {
     const liveCount = groups.get("working")!.length + groups.get("idle")!.length;
     const info = `${liveCount} live · ${groups.get("closed")!.length} closed`;
 
-    const title = this.rename
-      ? "Rename session"
-      : this.searching
-        ? `Search: ${this.query || "…"}`
-        : "Sessions";
+    // The filter stays visible after Enter: a list that is silently filtered is a
+    // list whose rows appear to be missing.
+    const title = this.help
+      ? "Keys"
+      : this.rename
+        ? "Rename session"
+        : this.searching
+          ? `Search: ${this.query}`
+          : this.query
+            ? `Sessions — filter: ${this.query}`
+            : "Sessions";
 
-    // Counts live on the top border, right aligned, so the body stays clean.
     const top = border(topBorder(title, info, width));
     const bottom = border("╰" + "─".repeat(Math.max(0, width - 2)) + "╯");
+    const { budget, errorLines } = this.bodyBudget(height, inner);
 
     let body: string[] = [];
-    if (this.confirmation) {
+    if (this.help) {
+      body = this.helpBody(theme, inner);
+    } else if (this.confirmation) {
       const { row, confirm } = this.confirmation;
       body = [
         theme.bold(row.name),
@@ -517,19 +727,19 @@ export class SessionsPanel {
         `${confirm ? theme.fg("accent", "❯") : " "} Delete`,
       ];
     } else if (this.rename) {
+      // The caret is drawn where it actually is. It used to be glued to the end of
+      // the draft, so moving left with the arrow keys changed nothing on screen
+      // and the next character appeared in the middle of a line that looked whole.
+      const { draft, cursor } = this.rename;
+      const head = truncateToWidth(draft.slice(0, cursor), Math.max(1, inner - 3), "…", true);
+      const tail = truncateToWidth(draft.slice(cursor), Math.max(1, inner - 3 - visibleWidth(head)), "…");
       body = [
         theme.bold(this.rename.row.name),
         "",
-        `${theme.fg("accent", "❯")} ${this.rename.draft}${theme.fg("accent", "▌")}`,
-        "",
-        theme.fg("dim", "enter saves · esc cancels"),
+        `${theme.fg("accent", "❯")} ${head}${theme.fg("accent", "▌")}${tail}`,
       ];
     } else {
-      // Column widths need every row, but strings only need the visible ones.
-      // Measuring is cheap (two small numbers per row); formatting is not.
       const nodes = this.nodes();
-      // Column widths are clamped anyway, so a sample is enough. Measuring all
-      // 1165 closed rows cost 0.6ms per rebuild for no visible benefit.
       const sample = nodes.filter((n) => n.kind === "row").slice(0, 200).map((n) => n.row!);
       const folderWidth = Math.min(
         Math.max(0, ...sample.map((r) => visibleWidth(shortCwd(r.cwd)))),
@@ -541,23 +751,7 @@ export class SessionsPanel {
       );
       const rightWidth = sample.length ? folderWidth + 3 + ageWidth : 0;
 
-      // Only the window is drawn, so only the window is formatted. Formatting all
-      // 1165 closed rows cost 3.5k truncate calls per rebuild for nothing.
-      const extra = this.error
-        ? wrapTextWithAnsi(this.error, inner).slice(0, 2).map((s) => theme.fg("error", s))
-        : [];
-      // One row is reserved for the status footer inside the frame.
-      const available = Math.max(1, height - 5);
-      const budget = Math.max(1, available - extra.length);
-
-      // Every row and header occupies exactly one line, so the window is arithmetic.
-      const found = nodes.findIndex((n) => n.id === this.selected);
-      let start = found < 0 ? 0 : Math.max(0, Math.min(this.windowStart, found));
-      if (found >= 0) start = Math.max(start, found - budget + 1);
-      if (found >= 0 && found < start) start = found;
-      this.windowStart = start;
-
-      const rows = nodes.slice(start, start + budget);
+      const rows = nodes.slice(this.windowStart, this.windowStart + budget);
       for (const node of rows) {
         if (node.kind === "header") {
           body.push(theme.fg("muted", truncateToWidth(` ${SECTION_TITLE[node.section]}`, inner)));
@@ -582,13 +776,17 @@ export class SessionsPanel {
             theme.fg("dim", right),
         );
       }
-      if (total === 0) body = [theme.fg("dim", this.query ? "No session matches this search." : "No sessions.")];
-      body.push(...extra);
+      if (total === 0) body = [theme.fg("dim", this.emptyMessage())];
     }
 
+    body.push(...errorLines.map((s) => theme.fg("error", s)));
+
+    // Never pad past the budget: a wrapped path in the confirmation screen used to
+    // push the frame past the overlay's max height.
+    if (body.length > Math.max(1, height - 5)) body = body.slice(0, Math.max(1, height - 5));
     while (body.length < Math.max(1, height - 5)) body.push("");
 
-    const hint = truncateToWidth("← again to close  ·  R rescan  ·  / search", inner);
+    const hint = truncateToWidth(this.hint(), inner);
     const framed = [
       top,
       border("│") + " ".repeat(Math.max(0, width - 2)) + border("│"),
@@ -598,6 +796,16 @@ export class SessionsPanel {
     ];
 
     return framed.map((line) => padEndVisible(truncateToWidth(line, width), width));
+  }
+
+  /** Why the list is empty, told apart so a bad regex is not reported as no match. */
+  private emptyMessage(): string {
+    if (this.query) {
+      const parsed = parseSearch(this.query);
+      if (parsed.error) return `Search error: ${parsed.error}`;
+      return "No session matches this search.";
+    }
+    return "No sessions.";
   }
 
   /**

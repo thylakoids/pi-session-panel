@@ -54,7 +54,8 @@ const SYSTEM_PROMPT = [
   "should be), and do not state what you cannot do. If the content is just a URL or reference,",
   "name what it points at (the Slack thread, GitHub issue, pull request, or document) with the",
   "repository name and issue or pull-request number when it carries them, never an opaque ID.",
-  "Reply with the title only: no quotes, no JSON, no explanation, no trailing punctuation.",
+  "Reply with JSON: {\"title\": \"...\"}, and nothing else.",
+  "The title itself is plain text: no quotes, no punctuation, no explanation.",
 ].join(" ");
 
 /**
@@ -168,14 +169,77 @@ export function nameSource(
   return namingUnits(content) < MIN_UNITS ? undefined : content;
 }
 
-/** Trim a model reply down to something safe to store as a name. */
+/** Claude Code's \`wB\`: models still fence JSON in markdown often enough to strip it. */
+function stripFence(text: string): string {
+  return text.replace(/^```[a-zA-Z]*\s*/, "").replace(/\s*```\s*$/, "");
+}
+
+/**
+ * The \`title\` field of a JSON reply, or undefined when the reply is not JSON.
+ *
+ * Claude Code gets this for free: its \`json_schema\` output format makes the
+ * provider produce exactly \`{"title": ...}\`. pi's \`complete()\` has no response
+ * format, so the instruction in the prompt is all there is and the reply has to be
+ * parsed leniently -- a model that wraps it in prose must still yield its title.
+ */
+function titleFromJson(text: string): string | undefined {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) return undefined;
+  try {
+    const parsed = JSON.parse(text.slice(start, end + 1)) as { title?: unknown };
+    return typeof parsed.title === "string" ? parsed.title : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Turn whatever the model replied into a plain-text name.
+ *
+ * pi has no response format, so the reply arrives unconstrained and this has to
+ * survive a model that narrates its own edits: the reply
+ * `Pi hermes-memory 调研与风险分析 — 改为："pi-hermes-memory 项目调研"（避免动词）`
+ * is a real one that became a session name. The order below matters — take the JSON
+ * field if there is one, cut the explanation, drop the aside, then strip punctuation
+ * — and identifier characters (`.`, `-`, `_`) survive, because a name like
+ * `naming.ts` or `pi-session-panel` is the most useful thing a title can carry.
+ *
+ * Exported for tests.
+ */
 export function cleanTitle(raw: string): string {
-  return raw
-    .replace(/^["'`]+|["'`]+$/g, "")
-    .replace(/\s+/g, " ")
-    .replace(/[.。,，;；:：]+$/g, "")
-    .trim()
-    .slice(0, 60);
+  let text = stripFence(raw.trim());
+  const json = titleFromJson(text);
+  if (json !== undefined) text = json;
+
+  // An explanation is appended after a dash. The title is what came first.
+  // Only a spaced dash splits: "pi-session-panel" is one token, "A — B" is two.
+  text = text.split(/\s+[\u2013\u2014-]+\s+|\s*[\u2013\u2014]+\s*/)[0] ?? text;
+
+  // A parenthetical aside is commentary about the title, not part of it.
+  text = text.replace(/[\uFF08(][^\uFF08\uFF09()]*[\uFF09)]/g, " ");
+
+  // Quotes and brackets never belong in a name.
+  text = text.replace(/["'`\u2018\u2019\u201c\u201d\u300c\u300d\u300e\u300f]/g, "");
+  text = text.replace(/[\[\]{}()\u3010\u3011\uFF08\uFF09]/g, " ");
+
+  // Separators become spaces; sentence punctuation is dropped with them.
+  text = text.replace(/[,;:\uFF0C\uFF1B\uFF1A\u3001\u3002\uFF01\uFF1F!?]/g, " ");
+  text = text.replace(/[\u2026\u00b7]/g, " ");
+
+  // A period or hyphen outside a token is a separator; inside one it is the
+  // identifier ("naming.ts", "pi-session-panel") and stays.
+  text = text.replace(/(?<![\p{L}\p{N}])[.\-]+|[.\-]+(?![\p{L}\p{N}])/gu, " ");
+
+  text = text.replace(/\s+/g, " ").trim();
+
+  // A space between two CJK characters is a layout artefact, never a word break.
+  text = text.replace(
+    /(?<=[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af])\s+(?=[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af])/g,
+    "",
+  );
+
+  return text.slice(0, 60).trim();
 }
 
 /** The user turn Claude Code sends: the content in tags, then the language rule. */

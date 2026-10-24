@@ -88,18 +88,15 @@ export function rowFromRecord(record: RegistryRecord): SessionRow {
   return {
     key: `live:${record.pid}`,
     state: record.state,
-    name: named || fromFile || lastSegment(record.cwd),
+    // A session that has said nothing yet has no name and no first message. The
+    // directory it happens to run in is not its name, so say what it is instead.
+    name: named || fromFile || "(new session)",
     cwd: record.cwd,
     updatedAt: record.updatedAt,
     workingSince: record.workingSince,
     pane: record.pane,
     sessionFile: record.sessionFile,
   };
-}
-
-function lastSegment(path: string): string {
-  const parts = path.split("/").filter(Boolean);
-  return parts.at(-1) ?? path;
 }
 
 /**

@@ -6,19 +6,20 @@
  */
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { mkdtempSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { SessionsPanel } from "../extension/panel.ts";
 import { readRegistry, writeRecord, removeRecord } from "../extension/registry.ts";
-import { closedScanDir, insertClosed } from "../extension/closed.ts";
+import { closedScanDir, insertClosed, isSubagentSession, scanClosed } from "../extension/closed.ts";
+import { readClosedCache, writeClosedCache } from "../extension/closed-cache.ts";
 import { parseSearch, matchSearch } from "../extension/search.ts";
 import { buildUserPrompt, capInput, cleanTitle, createNamer, nameSource, resolveModel, sessionContent } from "../extension/naming.ts";
 import { spinnerGlyphAt as currentGlyphForTest } from "../extension/panel.ts";
 import { readConfig } from "../extension/config.ts";
-import { dedupeLive, withoutLiveDuplicates } from "../extension/live.ts";
+import { dedupeLive, rowFromRecord, withoutLiveDuplicates } from "../extension/live.ts";
 import { mkdtempSync as mkdtemp2, writeFileSync as writeFile2 } from "node:fs";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
@@ -275,12 +276,40 @@ test("the redraw gate stays quiet when nothing changed", () => {
   }
 });
 
-test("cleanTitle strips quotes, punctuation and runaway length", () => {
+test("cleanTitle keeps identifier characters and drops punctuation", () => {
   assert.equal(cleanTitle('"Refactor the session registry."'), "Refactor the session registry");
-  assert.equal(cleanTitle("  多个   空格  "), "多个 空格");
+  // A space between two CJK characters is a layout artefact, not a word break.
+  assert.equal(cleanTitle("  多个   空格  "), "多个空格");
   assert.equal(cleanTitle("滑点模型偏高。"), "滑点模型偏高");
   assert.equal(cleanTitle("x".repeat(200)).length, 60);
   assert.equal(cleanTitle("   "), "");
+
+  // Punctuation is stripped, but a dot or hyphen inside a token is the name of a
+  // file or a package, and that is the most useful thing a title can carry.
+  assert.equal(cleanTitle("naming.ts 里 resolveModel 的重排逻辑"), "naming.ts 里 resolveModel 的重排逻辑");
+  assert.equal(cleanTitle("pi-session-panel config 读取方式排查"), "pi-session-panel config 读取方式排查");
+  assert.equal(cleanTitle(JSON.stringify('pi_hermes_memory')), 'pi_hermes_memory');
+  assert.equal(cleanTitle("- leading hyphen"), "leading hyphen");
+});
+
+test("cleanTitle survives a model that narrates its own edit", () => {
+  // The real reply that became a session name: the model wrote a draft, then
+  // appended its own correction after a dash. Everything after the dash goes.
+  assert.equal(
+    cleanTitle('Pi hermes-memory 调研与风险分析 — 改为："pi-hermes-memory 项目调研"（避免动词）'),
+    "Pi hermes-memory 调研与风险分析",
+  );
+  assert.equal(cleanTitle("Resolve model 候选合并逻辑 (avoid verbs)"), "Resolve model 候选合并逻辑");
+  assert.equal(cleanTitle("Session panel cache - renamed for clarity"), "Session panel cache");
+});
+
+test("cleanTitle takes the title field of a JSON reply", () => {
+  // Claude Code gets a JSON schema from the provider; pi does not, so the prompt
+  // asks for the same shape and the reply is parsed leniently.
+  assert.equal(cleanTitle('{"title": "Closed 分区不显示 subagents"}'), "Closed 分区不显示 subagents");
+  assert.equal(cleanTitle('```json\n{"title": "Panel cache"}\n```'), "Panel cache");
+  assert.equal(cleanTitle('Here you go: ' + JSON.stringify({ title: 'Spinner sync' }) + ' — enjoy'), 'Spinner sync');
+  assert.equal(cleanTitle(JSON.stringify({ notatitle: 1 })), 'notatitle 1');
 });
 
 test("naming content is every human turn, in order, with no assistant or tool text", () => {
@@ -337,6 +366,169 @@ test("the user prompt wraps the content in session tags and states the language 
   const prompt = buildUserPrompt("修一下滑点模型");
   assert.ok(prompt.startsWith("<session>\n修一下滑点模型\n</session>"), prompt);
   assert.match(prompt, /predominant language of the session/, "the language rule travels with the content");
+});
+
+test("arrow keys move the selection while searching", () => {
+  const rows = [row({ key: "live:1", name: "alpha" }), row({ key: "live:2", name: "beta" })];
+  const { instance } = panel(() => rows);
+  instance.handleInput("/");
+  instance.handleInput("a");
+  const before = instance.selectedKey();
+  instance.handleInput("\x1b[B"); // down
+  assert.notEqual(instance.selectedKey(), before, "down must move the selection during search");
+  instance.handleInput("\x1b[A"); // up
+  assert.equal(instance.selectedKey(), before, "up must move it back");
+});
+
+test("the left arrow does not close the panel while typing", () => {
+  const rows = [row({ key: "live:1", name: "alpha" })];
+  const { instance, calls } = panel(() => rows);
+  instance.handleInput("/");
+  assert.equal(instance.isEditingText(), true, "search is a text field");
+  instance.handleInput("\x1b");
+  instance.handleInput("r");
+  assert.equal(instance.isEditingText(), true, "rename is a text field");
+  assert.ok(!calls.includes("close"), "the panel must stay open");
+});
+
+test("rename edits at the caret, not at the end", async () => {
+  const rows = [row({ key: "live:1", name: "abc" })];
+  const renamed: string[] = [];
+  const { instance } = panel(() => rows, { rename: (_row: any, next: string) => renamed.push(next) });
+  instance.handleInput("r");
+  instance.handleInput("\x1b[D"); // left
+  instance.handleInput("\x1b[D"); // left
+
+  // The caret is drawn where it is, not at the end of the draft: the whole point
+  // of moving it is that the next character lands in a visible place.
+  const drawn = instance.render(theme, 80, 20).join("\n");
+  assert.match(drawn, /\u276f a\u258Cbc/, "the caret sits between a and b");
+
+  instance.handleInput("X");
+  await instance.handleInput("\r");
+  assert.deepEqual(renamed, ["aXbc"], "the character lands where the caret is");
+});
+
+test("backspace removes a whole code point, not half a surrogate pair", async () => {
+  const rows = [row({ key: "live:1", name: "ab\u{1F600}" })];
+  const renamed: string[] = [];
+  const { instance } = panel(() => rows, { rename: (_row: any, next: string) => renamed.push(next) });
+  instance.handleInput("r");
+  instance.handleInput("\x7f"); // backspace
+  await instance.handleInput("\r");
+  assert.deepEqual(renamed, ["ab"], "the emoji is removed whole");
+});
+
+test("an empty rename is refused instead of silently doing nothing", () => {
+  const rows = [row({ key: "live:1", name: "abc" })];
+  const renamed: string[] = [];
+  const { instance } = panel(() => rows, { rename: (_row: any, next: string) => renamed.push(next) });
+  instance.handleInput("r");
+  for (let i = 0; i < 3; i++) instance.handleInput("\x7f");
+  return instance.handleInput("\r").then(() => {
+    assert.deepEqual(renamed, [], "nothing is written");
+    assert.match(instance.errorText(), /needs a name/, "and the user is told why");
+  });
+});
+
+test("the ? help screen lists r rename and closes on the next key", () => {
+  const rows = [row({ key: "live:1", name: "alpha" })];
+  const { instance } = panel(() => rows);
+  instance.handleInput("?");
+  const screen = instance.render(theme, 100, 24).join("\n");
+  assert.match(screen, /rename this session/, "the list mentions rename");
+  assert.match(screen, /Keys/, "the title says what this is");
+  // The next key must be consumed by the help screen, not act on the list.
+  instance.handleInput("X");
+  assert.ok(!instance.render(theme, 100, 24).join("\n").includes("rename this session"), "any key closes it");
+});
+
+test("the hint row says what the keys do in the current mode", () => {
+  const rows = [row({ key: "live:1", name: "alpha" })];
+  const { instance } = panel(() => rows);
+  const normal = instance.render(theme, 120, 24).join("\n");
+  assert.match(normal, /r rename/, "the list hint must mention rename");
+  instance.handleInput("/");
+  const searching = instance.render(theme, 120, 24).join("\n");
+  assert.match(searching, /pick a result/, "search has its own hint");
+  assert.doesNotMatch(searching, /again to close/, "and does not advertise the close gesture");
+});
+
+test("a live session with no name reads (new session), not its directory", () => {
+  const record = { pid: 1, cwd: "/Users/someone/projects/my-repo", state: "idle" as const, updatedAt: 1 };
+  assert.equal(rowFromRecord(record).name, "(new session)");
+});
+
+test("a session spawned by pi-interactive-subagents is not a closed row", () => {
+  const dir = mkdtempSync(join(tmpdir(), "panel-subagent-"));
+  const file = join(dir, "2026-01-01T00-00-00-000Z_abc.jsonl");
+  writeFileSync(file, "{\"type\":\"session\",\"version\":3,\"id\":\"a\",\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"cwd\":\"/tmp/x\"}\n");
+  assert.equal(isSubagentSession(file), false, "a plain session is a session");
+  // Both sidecars mean the same thing: this file was spawned, not started.
+  for (const sidecar of [".loadout.json", ".cli.json"]) {
+    writeFileSync(file + sidecar, "{}");
+    assert.equal(isSubagentSession(file), true, sidecar + " marks a subagent");
+  }
+});
+
+test("the closed scan skips subagent session files", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "panel-scan-"));
+  const header = JSON.stringify({ type: "session", version: 3, id: "id-1", timestamp: "2026-01-01T00:00:00.000Z", cwd: "/tmp/x" });
+  const message = JSON.stringify({ type: "message", id: "m1", parentId: null, timestamp: "2026-01-01T00:00:01.000Z", message: { role: "user", content: [{ type: "text", text: "hello there world" }], timestamp: 1 } });
+  const real = join(dir, "2026-01-01T00-00-00-000Z_real.jsonl");
+  const spawned = join(dir, "2026-01-01T00-00-01-000Z_spawned.jsonl");
+  for (const file of [real, spawned]) writeFileSync(file, header + "\n" + message + "\n");
+  writeFileSync(spawned + ".loadout.json", "{}");
+
+  const { rows } = await scanClosed(dir);
+  assert.equal(rows.length, 1, "only the session a human started is listed");
+  assert.equal(rows[0]!.sessionFile, real);
+});
+
+test("a warm scan reuses rows whose file stamp is unchanged", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "panel-warm-"));
+  const header = JSON.stringify({ type: "session", version: 3, id: "id-1", timestamp: "2026-01-01T00:00:00.000Z", cwd: "/tmp/x" });
+  const message = JSON.stringify({ type: "message", id: "m1", parentId: null, timestamp: "2026-01-01T00:00:01.000Z", message: { role: "user", content: [{ type: "text", text: "hello there world" }], timestamp: 1 } });
+  writeFileSync(join(dir, "2026-01-01T00-00-00-000Z_one.jsonl"), header + "\n" + message + "\n");
+
+  const cold = await scanClosed(dir);
+  assert.equal(cold.rows.length, 1);
+  assert.equal(cold.cache.length, 1);
+  assert.match(cold.cache[0]!.stamp, /^\d+:\d+(\.\d+)?$/, "the stamp is size:mtime");
+
+  // Second pass with the cache from the first: the same row, still stamped.
+  const warm = await scanClosed(dir, cold.cache);
+  assert.equal(warm.rows.length, 1);
+  assert.equal(warm.rows[0]!.key, cold.rows[0]!.key);
+  assert.equal(warm.cache[0]!.stamp, cold.cache[0]!.stamp);
+});
+
+test("a session file that disappears leaves the cached list", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "panel-gone-"));
+  const header = JSON.stringify({ type: "session", version: 3, id: "id-1", timestamp: "2026-01-01T00:00:00.000Z", cwd: "/tmp/x" });
+  const message = JSON.stringify({ type: "message", id: "m1", parentId: null, timestamp: "2026-01-01T00:00:01.000Z", message: { role: "user", content: [{ type: "text", text: "hello there world" }], timestamp: 1 } });
+  const file = join(dir, "2026-01-01T00-00-00-000Z_one.jsonl");
+  writeFileSync(file, header + "\n" + message + "\n");
+  const cold = await scanClosed(dir);
+  assert.equal(cold.rows.length, 1, "the session is there to begin with");
+
+  rmSync(file);
+  const after = await scanClosed(dir, cold.cache);
+  assert.equal(after.rows.length, 0, "a deleted file must not survive in the cache");
+});
+
+test("a corrupted cache is ignored instead of breaking the panel", () => {
+  const dir = mkdtempSync(join(tmpdir(), "panel-cache-"));
+  const path = join(dir, "closed-cache.json");
+  assert.equal(readClosedCache(path), null, "no file means no cache");
+  writeFileSync(path, "{ not json");
+  assert.equal(readClosedCache(path), null, "a broken file is ignored");
+  writeFileSync(path, JSON.stringify({ version: 999, savedAt: 0, rows: [] }));
+  assert.equal(readClosedCache(path), null, "a cache from another version is dropped");
+
+  writeClosedCache(path, [{ row: { key: "closed:/a", state: "closed", name: "a", cwd: "/a", updatedAt: 1 }, stamp: "1:1" }]);
+  const read = readClosedCache(path);
+  assert.equal(read?.rows.length, 1, "what was written comes back");
 });
 
 test("the namer does nothing without a configured model", async () => {
