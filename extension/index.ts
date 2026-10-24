@@ -13,6 +13,8 @@ import { matchesKey } from "@earendil-works/pi-tui";
 import { createGestureEditor } from "./editor.ts";
 import { SessionsPanel } from "./panel.ts";
 import { loadClosed, insertClosed, rowFromInfo, type ClosedIndex } from "./closed.ts";
+import { readConfig, writeConfigExample } from "./config.ts";
+import { createNamer } from "./naming.ts";
 import { ownPane, rowFromRecord } from "./live.ts";
 import { readRegistry, registryDir, removeRecord, writeRecord, type RegistryRecord } from "./registry.ts";
 import type { SessionRow } from "./types.ts";
@@ -72,6 +74,19 @@ export default function (pi: ExtensionAPI) {
   };
 
   let ctx: ExtensionContext | undefined;
+
+  // ── automatic naming ────────────────────────────────────────────────────────
+  // Configured, not defaulted: which model is cheap is the user's call.
+  writeConfigExample(agentDir);
+  const config = readConfig(agentDir);
+  const maybeName = createNamer({
+    pi,
+    model: () => config.titleModel,
+    onNamed: (name) => {
+      self.name = name;
+      publish();
+    },
+  });
 
   const publish = () => {
     self.updatedAt = Date.now();
@@ -332,6 +347,9 @@ const RESTORE_SESSION = "pi-sessions";
     syncSession();
     self.state = "idle";
     publish();
+    // A resumed session may already have messages and no name; name it now.
+    // Never awaited: naming must not delay startup.
+    void maybeName(context);
 
     if (context.mode !== "tui") return;
     const GestureEditor = createGestureEditor({
@@ -339,6 +357,12 @@ const RESTORE_SESSION = "pi-sessions";
       isBlocked: () => panelOpen,
     });
     context.ui.setEditorComponent((tui, theme, keybindings) => new GestureEditor(tui, theme, keybindings) as any);
+  });
+
+  pi.on("before_agent_start", (event, context) => {
+    // The prompt that triggered this run is not on the branch yet, so pass it in.
+    if (event.messageType !== "user") return;
+    void maybeName(context, event.prompt);
   });
 
   pi.on("agent_start", () => {

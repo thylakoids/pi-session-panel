@@ -15,6 +15,7 @@ import { SessionsPanel } from "../extension/panel.ts";
 import { readRegistry, writeRecord, removeRecord } from "../extension/registry.ts";
 import { insertClosed } from "../extension/closed.ts";
 import { parseSearch, matchSearch } from "../extension/search.ts";
+import { cleanTitle, firstUserText, createNamer } from "../extension/naming.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 const theme = {
@@ -253,4 +254,121 @@ test("the redraw gate stays quiet when nothing changed", () => {
   } finally {
     Date.now = realNow;
   }
+});
+
+test("cleanTitle strips quotes, punctuation and runaway length", () => {
+  assert.equal(cleanTitle('"Refactor the session registry."'), "Refactor the session registry");
+  assert.equal(cleanTitle("  多个   空格  "), "多个 空格");
+  assert.equal(cleanTitle("滑点模型偏高。"), "滑点模型偏高");
+  assert.equal(cleanTitle("x".repeat(200)).length, 60);
+  assert.equal(cleanTitle("   "), "");
+});
+
+test("firstUserText takes the first non-empty user line on the branch", () => {
+  const branch = [
+    { type: "message", message: { role: "system", content: "" } },
+    { type: "message", message: { role: "user", content: "\n\n  first real line  \nsecond" } },
+    { type: "message", message: { role: "user", content: "later" } },
+  ];
+  const context = { sessionManager: { getBranch: () => branch } } as any;
+  assert.equal(firstUserText(context), "first real line");
+  assert.equal(firstUserText({ sessionManager: { getBranch: () => [] } } as any), undefined);
+
+  // The namer relies on this: an unusable message must yield undefined, not "".
+  for (const content of ["", "   \n  ", [], [{ type: "image" }]]) {
+    const ctx = { sessionManager: { getBranch: () => [{ type: "message", message: { role: "user", content } }] } } as any;
+    assert.equal(firstUserText(ctx), undefined, `content ${JSON.stringify(content)} must yield undefined`);
+  }
+});
+
+test("the namer does nothing without a configured model", async () => {
+  let calls = 0;
+  const namer = createNamer({
+    pi: { setSessionName: () => calls++ } as any,
+    model: () => undefined,
+  });
+  const context = {
+    sessionManager: {
+      getSessionName: () => undefined,
+      getBranch: () => [{ type: "message", message: { role: "user", content: "hello" } }],
+    },
+    modelRegistry: { find: () => undefined, complete: async () => ({ content: [] }) },
+  } as any;
+  await namer(context);
+  assert.equal(calls, 0, "no model configured means no call and no name");
+});
+
+test("the namer leaves an already-named session alone", async () => {
+  let completed = 0;
+  const namer = createNamer({
+    pi: { setSessionName: () => {} } as any,
+    model: () => "magpie/glm-5.3-flash",
+  });
+  const context = {
+    sessionManager: {
+      getSessionName: () => "already named",
+      getBranch: () => [{ type: "message", message: { role: "user", content: "hello" } }],
+    },
+    modelRegistry: {
+      find: () => ({ id: "glm-5.3-flash" }),
+      complete: async () => { completed++; return { content: [] }; },
+    },
+  } as any;
+  await namer(context);
+  assert.equal(completed, 0, "must not spend a model call on a named session");
+});
+
+test("concurrent triggers spend one model call and write one name", async () => {
+  const names: string[] = [];
+  let calls = 0;
+  const namer = createNamer({
+    pi: { setSessionName: (n: string) => names.push(n) } as any,
+    model: () => "magpie/glm-5.3-flash",
+  });
+  const context = {
+    sessionManager: {
+      getSessionName: () => undefined,
+      getBranch: () => [{ type: "message", message: { role: "user", content: "hello" } }],
+    },
+    modelRegistry: {
+      find: () => ({ id: "glm-5.3-flash" }),
+      complete: async () => {
+        calls++;
+        await new Promise((r) => setTimeout(r, 20));
+        return { content: [{ type: "text", text: "A short name" }] };
+      },
+    },
+  } as any;
+
+  await Promise.all([namer(context), namer(context), namer(context)]);
+  assert.equal(calls, 1, "the in-flight guard must collapse concurrent triggers");
+  assert.deepEqual(names, ["A short name"]);
+});
+
+test("a failed naming attempt is retried next time", async () => {
+  const names: string[] = [];
+  let attempt = 0;
+  const namer = createNamer({
+    pi: { setSessionName: (n: string) => names.push(n) } as any,
+    model: () => "magpie/glm-5.3-flash",
+  });
+  const context = {
+    sessionManager: {
+      getSessionName: () => undefined,
+      getBranch: () => [{ type: "message", message: { role: "user", content: "hello" } }],
+    },
+    modelRegistry: {
+      find: () => ({ id: "glm-5.3-flash" }),
+      complete: async () => {
+        attempt++;
+        if (attempt === 1) throw new Error("network");
+        return { content: [{ type: "text", text: "Second time works" }] };
+      },
+    },
+  } as any;
+
+  await namer(context);
+  assert.deepEqual(names, [], "a failure must not write a name");
+  await namer(context);
+  assert.deepEqual(names, ["Second time works"], "the retry must succeed");
 });

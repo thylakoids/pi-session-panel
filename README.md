@@ -22,6 +22,20 @@ pi install ~/Agent/pi-session-panel
 - 在输入框第一行行首再按一次 **左方向键** 打开面板
 - 面板里再按一次 **左方向键**、`Esc` 或 `q` 关闭
 
+## 配置
+
+`~/.pi/agent/session-panel/config.json`，首次启动自动生成：
+
+```json
+{
+  "titleModel": "glm-5.3-flash"
+}
+```
+
+`titleModel` 是给会话自动起名用的模型，写模型 id 即可，不需要 provider 前缀。**留空就不起名** —— 插件不带默认值，用哪个模型由你决定。
+
+起名规则：会话没有名字、且已经有 user 消息时，用这个模型生成一个短标题，写进 `session_info`。有名字就不再改。
+
 ## 三个分区
 
 | 分区 | 来源 | X 键的含义 |
@@ -74,3 +88,4 @@ npm test
 - [docs/adr/0004](./docs/adr/0004-left-arrow-gesture-editor.md) — 左方向键手势与全局编辑器替换
 - [docs/adr/0005](./docs/adr/0005-animation-costs-only-when-the-glyph-steps.md) — 动画只在字形真正变化时付出代价
 - [docs/adr/0006](./docs/adr/0006-reopen-in-a-fixed-tmux-session.md) — 恢复会话放进固定名字的 tmux session
+- [docs/adr/0007](./docs/adr/0007-session-naming.md) — 自动起名：一个检查，两个触发点
