@@ -83,24 +83,19 @@ const SPINNER_CYCLE: readonly string[] = [...SPINNER_FRAMES, ...[...SPINNER_FRAM
 /** Claude Code's `Kn`: one out-and-back in two seconds. */
 const SPINNER_PERIOD_MS = 2000;
 
-/**
- * Stable per-session offset into the spinner cycle. Claude Code drives a single
- * spinner from one clock; several sessions must not march in lockstep, so each
- * one enters the same two-second cycle at its own fixed point.
- */
-function rowPhase(key: string): number {
-  let hash = 0;
-  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) | 0;
-  return Math.abs(hash) % SPINNER_PERIOD_MS;
-}
-
 /** Claude Code's `qLe`: the cosine easing shared by the spinner and the glow. */
 function cosineEase(elapsed: number, period: number): number {
   return (1 - Math.cos((2 * Math.PI * elapsed) / period)) / 2;
 }
 
-/** Claude Code's `Zn`: quantise the eased value onto the frame ladder. */
-/** Exported for tests: the glyph at a given time, ignoring per-row phase. */
+/**
+ * Claude Code's `Zn`: quantise the eased value onto the frame ladder.
+ *
+ * Every working row draws from this one clock. Claude Code has a single spinner
+ * per conversation and no notion of several running at once, so a list where each
+ * row breathes on its own phase has no counterpart there: it reads as several
+ * unrelated animations instead of one panel with work in flight.
+ */
 export function spinnerGlyphAt(elapsed: number): string {
   return spinnerFrame(elapsed);
 }
@@ -426,9 +421,9 @@ export class SessionsPanel {
       this.confirmation ? `${this.confirmation.row.key}:${this.confirmation.confirm}` : "",
       this.error ?? "",
       this.windowStart,
-      // Every working row animates on its own phase, so the key has to cover all
-      // of them. Using one fixed phase here made the key describe a frame that was
-      // never drawn, and the cache then suppressed the animation entirely.
+      // Every working row shares one clock, so one glyph covers all of them.
+      // Reading the clock here, rather than the row set, is what lets the cache
+      // hold a frame still while nothing moves.
       this.workingGlyphs(at),
       // Ages change at most once a second, so a second is the granularity.
       Math.floor(at / 1000),
@@ -436,13 +431,16 @@ export class SessionsPanel {
     ].join("\u0000");
   }
 
-  /** The glyph each working row would draw right now, in row order. */
+  /**
+   * The glyph the working rows draw right now, or "" when nothing is working.
+   *
+   * One glyph for the whole section: the rows are in step, so there is nothing
+   * per-row to report. Returning "" when idle keeps the key stable while the
+   * panel sits there, which is what the frame cache needs to stay a hit.
+   */
   private workingGlyphs(at: number): string {
-    let out = "";
-    for (const row of this.rowsForFrame()) {
-      if (row.state === "working") out += spinnerFrame(at + rowPhase(row.key));
-    }
-    return out;
+    const anyWorking = this.rowsForFrame().some((row) => row.state === "working");
+    return anyWorking ? spinnerFrame(at) : "";
   }
 
   /**
@@ -573,7 +571,7 @@ export class SessionsPanel {
         const pointer = isSelected ? theme.fg("accent", "❯") : " ";
         const glyph =
           row.state === "working"
-            ? theme.fg("accent", spinnerFrame(at + rowPhase(row.key)))
+            ? theme.fg("accent", spinnerFrame(at))
             : theme.fg(row.state === "idle" ? "muted" : "dim", STATE_GLYPH[row.state]);
         const nameColor = isSelected ? "accent" : row.state === "closed" ? "muted" : "text";
         const left = `${pointer} ${glyph} ${theme.fg(nameColor, row.name)}`;

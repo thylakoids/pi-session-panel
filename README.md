@@ -81,7 +81,7 @@ spinner 每 200ms 才换一帧，面板只在那一刻重绘，其余 tick 由�
 npm test
 ```
 
-35 个测试，每一个都用「先埋 bug、确认测试变红」验证过，没有装饰性的测试。
+37 个测试，每一个都用「先埋 bug、确认测试变红」验证过，没有装饰性的测试。
 
 ## 文档
 
@@ -94,3 +94,4 @@ npm test
 - [docs/adr/0006](./docs/adr/0006-reopen-in-a-fixed-tmux-session.md) — 恢复会话放进固定名字的 tmux session
 - [docs/adr/0007](./docs/adr/0007-session-naming.md) — 自动起名：一个检查，两个触发点
 - [docs/adr/0008](./docs/adr/0008-title-context-follows-claude-code.md) — 起名的 context 对齐 Claude Code
+- [docs/adr/0009](./docs/adr/0009-one-spinner-clock.md) — 所有 working 行共用一个 spinner 时钟

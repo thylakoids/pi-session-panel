@@ -543,6 +543,41 @@ test("the spinner advances with time", () => {
   assert.ok(glyphs.size >= 5, `expected the whole ladder, saw ${[...glyphs].join("")}`);
 });
 
+test("every working row draws the same glyph", () => {
+  // Rows used to take a per-row phase offset so they would not march in lockstep.
+  // Claude Code has one spinner per conversation, so a list where each row breathes
+  // on its own schedule has no counterpart there and reads as several unrelated
+  // animations.
+  //
+  // The keys matter: a per-row phase hashed from the key can collide, and live:1 /
+  // live:2 / live:3 hash to phases 1037 / 1036 / 1035, which drew identical glyphs
+  // even with the bug in place. These are real pid-shaped keys, whose phases are
+  // far apart (1744 / 1729 / 321), so the assertion actually discriminates.
+  const rows = [
+    row({ key: "live:11729", state: "working", name: "one", workingSince: 1_700_000_000_000, updatedAt: 1_700_000_000_000 }),
+    row({ key: "live:12561", state: "working", name: "two", workingSince: 1_700_000_000_000, updatedAt: 1_700_000_000_000 }),
+    row({ key: "live:14002", state: "working", name: "three", workingSince: 1_700_000_000_000, updatedAt: 1_700_000_000_000 }),
+  ];
+  const { instance } = panel(() => rows);
+  const realNow = Date.now;
+  const glyph = /[·✢✳✶✻✽]/;
+  try {
+    const base = 1_700_000_000_000;
+    for (let ms = 0; ms <= 2000; ms += 100) {
+      Date.now = () => base + ms;
+      const lines = instance.render(theme, 100, 20);
+      const glyphs = lines
+        .filter((line) => line.includes("one") || line.includes("two") || line.includes("three"))
+        .map((line) => line.match(glyph)?.[0])
+        .filter((g): g is string => g !== undefined);
+      assert.equal(glyphs.length, 3, `expected three working rows at ${ms}ms`);
+      assert.equal(new Set(glyphs).size, 1, `rows differ at ${ms}ms: ${glyphs.join(" ")}`);
+    }
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test("the frame key changes as the spinner moves", () => {
   const rows = [row({ state: "working", workingSince: 1_700_000_000_000, updatedAt: 1_700_000_000_000 })];
   const { instance } = panel(() => rows);
