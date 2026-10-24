@@ -304,7 +304,7 @@ test("the namer leaves an already-named session alone", async () => {
   let completed = 0;
   const namer = createNamer({
     pi: { setSessionName: () => {} } as any,
-    model: () => "magpie/glm-5.3-flash",
+    model: () => "p/model-a",
   });
   const context = {
     sessionManager: {
@@ -312,7 +312,7 @@ test("the namer leaves an already-named session alone", async () => {
       getBranch: () => [{ type: "message", message: { role: "user", content: "hello" } }],
     },
     modelRegistry: {
-      find: () => ({ id: "glm-5.3-flash" }),
+      find: () => ({ id: "model-a" }),
       complete: async () => { completed++; return { content: [] }; },
     },
   } as any;
@@ -325,7 +325,7 @@ test("concurrent triggers spend one model call and write one name", async () => 
   let calls = 0;
   const namer = createNamer({
     pi: { setSessionName: (n: string) => names.push(n) } as any,
-    model: () => "magpie/glm-5.3-flash",
+    model: () => "p/model-a",
   });
   const context = {
     sessionManager: {
@@ -333,7 +333,7 @@ test("concurrent triggers spend one model call and write one name", async () => 
       getBranch: () => [{ type: "message", message: { role: "user", content: "hello" } }],
     },
     modelRegistry: {
-      find: () => ({ id: "glm-5.3-flash" }),
+      find: () => ({ id: "model-a" }),
       complete: async () => {
         calls++;
         await new Promise((r) => setTimeout(r, 20));
@@ -352,7 +352,7 @@ test("a failed naming attempt is retried next time", async () => {
   let attempt = 0;
   const namer = createNamer({
     pi: { setSessionName: (n: string) => names.push(n) } as any,
-    model: () => "magpie/glm-5.3-flash",
+    model: () => "p/model-a",
   });
   const context = {
     sessionManager: {
@@ -360,7 +360,7 @@ test("a failed naming attempt is retried next time", async () => {
       getBranch: () => [{ type: "message", message: { role: "user", content: "hello" } }],
     },
     modelRegistry: {
-      find: () => ({ id: "glm-5.3-flash" }),
+      find: () => ({ id: "model-a" }),
       complete: async () => {
         attempt++;
         if (attempt === 1) throw new Error("network");
@@ -383,62 +383,40 @@ function fakeRegistry(models: { provider: string; id: string }[]) {
   } as any;
 }
 
-test("a bare model id resolves without a provider prefix", () => {
+test("resolveModel splits on the first slash only", () => {
   const registry = fakeRegistry([
-    { provider: "magpie", id: "auto/glm-5.3-flash" },
-    { provider: "magpie", id: "auto/deepseek-flash" },
+    { provider: "p", id: "team/model-a" },
+    { provider: "q", id: "team/model-a" },
   ]);
-  const result = resolveModel(registry, "glm-5.3-flash");
-  assert.ok("model" in result, "a suffix must be enough");
-  assert.equal(result.model!.id, "auto/glm-5.3-flash");
-});
-
-test("an ambiguous id reports the candidates instead of guessing", () => {
-  // Suffix ambiguity with no preference given.
-  const registry = fakeRegistry([
-    { provider: "a", id: "auto/glm-5.3-flash" },
-    { provider: "b", id: "opencode-go/glm-5.3-flash" },
-  ]);
-  const result = resolveModel(registry, "glm-5.3-flash");
-  assert.ok("error" in result);
-  assert.match(result.error, /matches 2 models/);
-  assert.match(result.error, /auto\/glm-5\.3-flash/);
-});
-
-test("an ambiguous id resolves to the preferred provider", () => {
-  const registry = fakeRegistry([
-    { provider: "a", id: "auto/glm-5.3-flash" },
-    { provider: "b", id: "opencode-go/glm-5.3-flash" },
-  ]);
-  // No preference: ambiguous. With a preference: resolved, no config needed.
-  assert.ok("error" in resolveModel(registry, "glm-5.3-flash"));
-  const result = resolveModel(registry, "glm-5.3-flash", ["", "b"]);
+  const result = resolveModel(registry, "q/team/model-a");
   assert.ok("model" in result);
-  assert.equal(result.model!.provider, "b");
+  assert.equal(result.model!.provider, "q");
+  assert.equal(result.model!.id, "team/model-a");
 });
 
-test("an unknown model reports an error rather than resolving to nothing", () => {
-  const result = resolveModel(fakeRegistry([{ provider: "a", id: "other" }]), "nope");
+test("an id without a provider prefix is rejected with a usable message", () => {
+  const result = resolveModel(fakeRegistry([{ provider: "p", id: "model-a" }]), "model-a");
   assert.ok("error" in result);
-  assert.match(result.error, /no model matches/);
+  assert.match(result.error, /needs a provider prefix/);
 });
 
-test("a full provider/id still wins over suffix matching", () => {
-  const registry = fakeRegistry([
-    { provider: "a", id: "glm-5.3-flash" },
-    { provider: "b", id: "glm-5.3-flash" },
-  ]);
-  const result = resolveModel(registry, "b/glm-5.3-flash");
-  assert.ok("model" in result);
-  assert.equal(result.model!.provider, "b");
+test("an unknown model is reported rather than silently skipped", () => {
+  const result = resolveModel(fakeRegistry([{ provider: "p", id: "model-a" }]), "p/missing");
+  assert.ok("error" in result);
+  assert.match(result.error, /no model/);
+});
+
+test("an empty spec is reported", () => {
+  const result = resolveModel(fakeRegistry([]), "   ");
+  assert.ok("error" in result);
 });
 
 test("config accepts a bare string or the object form", () => {
   const dir = mkdtemp2(join(tmpdir(), "panel-config-"));
   mkdirSync(join(dir, "session-panel"), { recursive: true });
 
-  writeFile2(join(dir, "session-panel", "config.json"), "glm-5.3-flash\n");
-  assert.deepEqual(readConfig(dir), { titleModel: "glm-5.3-flash" }, "bare string");
+  writeFile2(join(dir, "session-panel", "config.json"), "model-a\n");
+  assert.deepEqual(readConfig(dir), { titleModel: "model-a" }, "bare string");
 
   writeFile2(join(dir, "session-panel", "config.json"), '{ "titleModel": "x/y" }');
   assert.deepEqual(readConfig(dir), { titleModel: "x/y" }, "object form");
@@ -454,7 +432,7 @@ test("a broken model config is reported once, not on every prompt", async () => 
   const reasons: string[] = [];
   const namer = createNamer({
     pi: { setSessionName: () => {} } as any,
-    model: () => "does-not-exist",
+    model: () => "p/does-not-exist",
     onBroken: (r) => reasons.push(r),
   });
   const context = {
@@ -469,5 +447,5 @@ test("a broken model config is reported once, not on every prompt", async () => 
   await namer(context);
   await namer(context);
   assert.equal(reasons.length, 1, "one warning per process is enough");
-  assert.match(reasons[0]!, /no model matches/);
+  assert.match(reasons[0]!, /no model/);
 });

@@ -10,27 +10,8 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export interface PanelConfig {
-  /**
-   * Model used to name sessions, as `provider/model`. Unset means naming is off.
-   * Example: "magpie/glm-5.3-flash".
-   */
+  /** Model used to name sessions, as `provider/model`. Unset means naming is off. */
   titleModel?: string;
-}
-
-/**
- * The provider this pi is configured to use by default.
- *
- * Read straight from settings.json rather than through the extension API, because
- * the API exposes the session's current model, not the configured default.
- */
-export function readDefaultProvider(agentDir: string): string {
-  try {
-    const parsed = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8")) as unknown;
-    const value = (parsed as { defaultProvider?: unknown })?.defaultProvider;
-    return typeof value === "string" ? value.trim() : "";
-  } catch {
-    return "";
-  }
 }
 
 export function configPath(agentDir: string): string {

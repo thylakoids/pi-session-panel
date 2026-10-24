@@ -26,21 +26,21 @@ pi install ~/Agent/pi-session-panel
 
 `~/.pi/agent/session-panel/config.json`，首次启动自动生成（空文件）。
 
-只写一行模型 id 就行：
+写一行 `provider/model`：
 
 ```
-glm-5.3-flash
+your-provider/your-model
 ```
 
-也可以写成 JSON，两种都认：
+也接受 JSON：
 
 ```json
-{ "titleModel": "glm-5.3-flash" }
+{ "titleModel": "your-provider/your-model" }
 ```
 
 **留空就不起名** —— 插件不带默认值，用哪个模型由你决定。
 
-模型 id 不需要写 provider 前缀：同名模型存在于多个 provider 时，优先用你当前会话的 provider，其次用 `settings.json` 里的 `defaultProvider`。真的无法判断时会提示你该写哪个。
+provider 前缀必须写全。model id 本身可能带斜杠，所以只按第一个斜杠切分 provider。写错了会在会话里提示一次，告诉你解析不到。
 
 起名规则：会话没有名字、且已经有 user 消息时，生成一个短标题写进 `session_info`。有名字就不再改。
 
