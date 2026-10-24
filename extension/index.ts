@@ -5,14 +5,13 @@
  * process's own record in the registry while it runs.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
 import { createGestureEditor } from "./editor.ts";
 import { SessionsPanel } from "./panel.ts";
-import { closedScanDir, loadClosed, insertClosed, rowFromInfo, type ClosedIndex } from "./closed.ts";
+import { closedScanDir, loadClosed, insertClosed, type ClosedIndex } from "./closed.ts";
 import { configPath, readConfig, writeConfigExample } from "./config.ts";
 import { createNamer } from "./naming.ts";
 import { dedupeLive, ownPane, rowFromRecord, withoutLiveDuplicates } from "./live.ts";
@@ -37,19 +36,6 @@ function tmuxSessionExists(name: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** The tmux session this pi runs in, as a target tmux will accept. */
-function tmuxTarget(): string {
-  const pane = process.env.TMUX_PANE;
-  if (pane) {
-    try {
-      return runTmux(["display-message", "-p", "-t", pane, "#{session_name}"]).trim();
-    } catch {
-      // Fall through to the default target.
-    }
-  }
-  return "";
 }
 
 /** tmux window names cannot carry the characters a session name might. */
@@ -146,7 +132,6 @@ export default function (pi: ExtensionAPI) {
   };
 
   // ── rows ────────────────────────────────────────────────────────────────────
-  // ── rows ────────────────────────────────────────────────────────────────────
   const rows = (): SessionRow[] => {
     const { live } = readRegistry(registry);
     const liveRows = dedupeLive(live).map(rowFromRecord);
@@ -184,7 +169,7 @@ export default function (pi: ExtensionAPI) {
               focus: (row) => focusPane(row, context),
               reopen: (row) => restore(row),
               interrupt: (row) => interrupt(row),
-              exit: (row) => exit(row, context),
+              exit: (row) => exit(row),
               remove: (row) => removeSession(row),
               rename: (row, next) => rename(row, next),
               rescan: () => rescan(context),
@@ -290,7 +275,7 @@ const RESTORE_SESSION = "pi-sessions";
   };
 
   /** Idle rows: ask the process to exit. */
-  const exit = (row: SessionRow, context: ExtensionContext) => {
+  const exit = (row: SessionRow) => {
     const pid = Number(row.key.replace("live:", ""));
     if (!Number.isInteger(pid)) throw new Error("This session has no process to stop.");
     try {

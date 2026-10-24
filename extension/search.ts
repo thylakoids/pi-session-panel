@@ -43,6 +43,7 @@ export function parseSearch(query: string): ParsedSearch {
   const tokens: ParsedSearch["tokens"] = [];
   let buffer = "";
   let inQuote = false;
+  let unclosedQuote = false;
   const flush = (kind: "fuzzy" | "phrase") => {
     const value = buffer.trim();
     buffer = "";
@@ -59,8 +60,32 @@ export function parseSearch(query: string): ParsedSearch {
       }
       continue;
     }
+    // Outside quotes whitespace ends a token: "bar foo" is two fuzzy words, not
+    // one phrase-like token. Keeping the space made the query match in a different
+    // order than pi -r, which splits on it.
+    if (!inQuote && /\s/.test(character)) {
+      flush("fuzzy");
+      continue;
+    }
     buffer += character;
   }
+  if (inQuote) unclosedQuote = true;
+
+  // An unbalanced quote makes the intent unknowable, so pi -r drops back to plain
+  // whitespace tokens. Treating the rest of the line as one phrase instead made the
+  // panel match sessions pi -r hides.
+  if (unclosedQuote) {
+    return {
+      mode: "tokens",
+      tokens: trimmed
+        .split(/\s+/)
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0)
+        .map((part) => ({ kind: "fuzzy" as const, value: part })),
+      regex: null,
+    };
+  }
+
   flush(inQuote ? "phrase" : "fuzzy");
   return { mode: "tokens", tokens, regex: null };
 }

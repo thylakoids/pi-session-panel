@@ -189,6 +189,21 @@ test("search matches the way pi -r does: fuzzy tokens, quoted phrases, re:", () 
   assert.ok(parseSearch("re:[").error, "invalid regex reports an error");
 });
 
+test("whitespace splits search tokens, and an unbalanced quote falls back like pi -r", () => {
+  // Both cases used to differ from pi -r. A bare query kept its spaces, so it
+  // behaved like one ordered phrase and missed sessions whose words are reversed;
+  // an unclosed quote swallowed the rest of the line as a phrase instead of
+  // dropping back to plain words. A panel that searches differently from the
+  // command it mirrors is worse than no search at all.
+  assert.ok(matchSearch("foo bar baz", parseSearch("bar foo")).matches, "word order must not matter");
+  assert.ok(!matchSearch("foo bar baz", parseSearch('"bar foo"')).matches, "a quoted phrase still orders");
+
+  const unclosed = parseSearch('"foo bar');
+  assert.equal(unclosed.tokens.length, 2, "an unclosed quote yields plain words");
+  assert.ok(unclosed.tokens.every((t) => t.kind === "fuzzy"), "and none of them is a phrase");
+  assert.ok(!matchSearch("foo baz", unclosed).matches, "so it stops matching a phrase it never closed");
+});
+
 test("the registry drops records whose process is gone", async () => {
   const dir = mkdtempSync(join(tmpdir(), "panel-registry-"));
   const child = spawn(process.execPath, ["-e", "setTimeout(()=>{}, 10000)"], { stdio: "ignore" });
