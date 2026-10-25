@@ -380,6 +380,33 @@ test("arrow keys move the selection while searching", () => {
   assert.equal(instance.selectedKey(), before, "up must move it back");
 });
 
+test("enter opens the selected search result directly", async () => {
+  const rows = [row({ key: "live:1", name: "alpha" }), row({ key: "live:2", name: "beta" })];
+  const { instance, calls } = panel(() => rows);
+  instance.handleInput("/");
+  instance.handleInput("a");
+  instance.handleInput("\x1b[B");
+  assert.equal(instance.selectedKey(), "live:2");
+  await instance.handleInput("\r");
+  assert.deepEqual(calls, ["focus", "close"]);
+  assert.equal(instance.isEditingText(), false);
+});
+
+test("search enter reopens a closed result and ignores an empty result set", async () => {
+  const rows = [row({ key: "closed:1", state: "closed", name: "archive" })];
+  const { instance, calls } = panel(() => rows);
+  instance.handleInput("/");
+  instance.handleInput("a");
+  await instance.handleInput("\r");
+  assert.deepEqual(calls, ["reopen", "close"]);
+
+  const empty = panel(() => rows);
+  empty.instance.handleInput("/");
+  empty.instance.handleInput("z");
+  await empty.instance.handleInput("\r");
+  assert.deepEqual(empty.calls, []);
+});
+
 test("the left arrow does not close the panel while typing", () => {
   const rows = [row({ key: "live:1", name: "alpha" })];
   const { instance, calls } = panel(() => rows);
@@ -450,9 +477,13 @@ test("the hint row says what the keys do in the current mode", () => {
   assert.match(normal, /r rename/, "the list hint must mention rename");
   instance.handleInput("/");
   const searching = instance.render(theme, 120, 24).join("\n");
-  assert.match(searching, /up\/down/, "alternatives are joined with a slash, no spaces");
+  assert.match(searching, /↑\/↓/, "arrow keys use compact glyphs");
   assert.match(searching, /pick/, "search has its own hint");
+  assert.match(searching, /enter open/, "enter opens the selected result");
   assert.doesNotMatch(searching, /again to close/, "and does not advertise the close gesture");
+  instance.handleInput("\x1b");
+  instance.handleInput("r");
+  assert.match(instance.render(theme, 120, 24).join("\n"), /←\/→ caret/, "rename hints use arrow glyphs");
 });
 
 test("a live session with no name reads (new session), not its directory", () => {

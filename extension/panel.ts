@@ -275,6 +275,10 @@ export class SessionsPanel {
     this.rememberSelection();
   }
 
+  private async open(row: SessionRow): Promise<void> {
+    await this.act(() => (row.state === "closed" ? this.options.actions.reopen(row) : this.options.actions.focus(row)));
+  }
+
   /** X means three different things. See docs/adr/0002. */
   private async pressX(): Promise<void> {
     const row = this.selectedRow();
@@ -347,14 +351,11 @@ export class SessionsPanel {
    * the slash separates alternatives inside one token, it is not punctuation
    * around it.
    *
-   * Arrow keys are spelled "up"/"down" rather than the glyphs. The glyphs are one
-   * narrow column wide and sit on a different baseline from Latin text, so a row of
-   * them reads as damage next to "enter" and "esc"; pi spells them out for the
-   * same reason.
+   * Arrow glyphs keep the hints compact in narrow panels.
    */
   private static readonly KEY_LIST: [string, string][] = [
     ["j/k", "move"],
-    ["up/down", "move too"],
+    ["↑/↓", "move too"],
     ["gg/G", "first / last"],
     ["enter", "open it"],
     ["X", "interrupt, exit or delete"],
@@ -388,13 +389,13 @@ export class SessionsPanel {
         : this.keyHint(theme, "any key", "close this list");
     }
     if (this.rename) {
-      return this.hints(theme, [["enter", "save"], ["esc", "cancel"], ["left/right", "caret"]]);
+      return this.hints(theme, [["enter", "save"], ["esc", "cancel"], ["←/→", "caret"]]);
     }
     if (this.confirmation) {
       return this.hints(theme, [["j/k", "choose"], ["enter", "confirm"], ["esc", "cancel"]]);
     }
     if (this.searching) {
-      return this.hints(theme, [["up/down", "pick"], ["enter", "keep"], ["esc", "clear"]]);
+      return this.hints(theme, [["↑/↓", "pick"], ["enter", "open"], ["esc", "clear"]]);
     }
     const parts: [string, string][] = [
       ["j/k", "move"],
@@ -527,6 +528,9 @@ export class SessionsPanel {
       }
       if (data === "\r" || data === "\n" || matchesKey(data, "return")) {
         this.searching = false;
+        this.clampSelection();
+        const row = this.selectedRow();
+        if (row) await this.open(row);
         return;
       }
       // The arrows belong to the result list, not to the query: the query is
@@ -612,7 +616,7 @@ export class SessionsPanel {
     if (!row) return;
 
     if (data === "\r" || data === "\n" || matchesKey(data, "return")) {
-      await this.act(() => (row.state === "closed" ? this.options.actions.reopen(row) : this.options.actions.focus(row)));
+      await this.open(row);
       return;
     }
     if (data === "X") {
