@@ -167,6 +167,29 @@ function cursorText(value: string, cursor: number, width: number): string {
   return `${head}\x1b[7m${underCaret}\x1b[27m${tail}`;
 }
 
+interface PanelCommand {
+  keys: string[];
+  action: string;
+  run(data: string): void | Promise<void>;
+  footer?: boolean;
+  label?: string;
+  fallback?: boolean;
+}
+
+const KEY_LABELS: Record<string, string> = {
+  up: "↑", down: "↓", left: "←", right: "→", return: "enter", escape: "esc",
+};
+
+function commandKey(command: PanelCommand): string {
+  return command.label ?? command.keys.map((key) => KEY_LABELS[key] ?? key).join("/");
+}
+
+function commandMatches(command: PanelCommand, data: string): boolean {
+  return command.fallback === true || command.keys.some((key) => (key.length === 1 && data === key) ||
+    (key === "return" && (data === "\r" || data === "\n")) ||
+    (key.length > 1 && matchesKey(data, key)));
+}
+
 interface Confirmation {
   row: SessionRow;
   confirm: boolean;
@@ -353,29 +376,84 @@ export class SessionsPanel {
     return undefined;
   }
 
-  /**
-   * The key list, and the footer's per-mode hint.
-   *
-   * Both follow pi's own footers (its keybinding-hints.js): the key token is dim,
-   * the action is muted, one space between them, and " · " between hints.
-   * Alternatives are joined with "/" and no spaces — "j/k", not "j / k" — because
-   * the slash separates alternatives inside one token, it is not punctuation
-   * around it.
-   *
-   * Arrow glyphs keep the hints compact in narrow panels.
-   */
-  private static readonly KEY_LIST: [string, string][] = [
-    ["j/k", "move"],
-    ["↑/↓", "move too"],
-    ["gg/G", "first / last"],
-    ["enter", "open it"],
-    ["X", "interrupt, exit or delete"],
-    ["r", "rename"],
-    ["/", "search"],
-    ["R", "rescan closed"],
-    ["?", "this list"],
-    ["q/esc", "close"],
-  ];
+  /** One registry drives dispatch, help and mode-specific footer hints. */
+  private commands(helpControls = true): PanelCommand[] {
+    const command = (keys: string[], action: string, run: PanelCommand["run"], footer = true, label?: string): PanelCommand =>
+      ({ keys, action, run, footer, label });
+    if (this.help && helpControls) return [
+      ...(this.helpOverflow ? [command(["up", "down", "j", "k"], "scroll", (data) => {
+        this.helpScroll = Math.max(0, this.helpScroll + (data === "k" || matchesKey(data, "up") ? -1 : 1));
+      })] : []),
+      { keys: [], label: this.helpOverflow ? "any other key" : "any key", action: "close", footer: true, fallback: true,
+        run: () => { this.help = false; this.helpScroll = 0; } },
+    ];
+    const clearSearch = () => {
+      this.query = "";
+      this.queryCursor = 0;
+      this.searching = false;
+      this.selected = null;
+      this.clampSelection();
+    };
+    const open = async () => {
+      this.searching = false;
+      this.clampSelection();
+      const row = this.selectedRow();
+      if (row) await this.open(row);
+    };
+    if (this.rename) return [
+      command(["return"], "save", () => this.saveRename()),
+      command(["escape"], "cancel", () => { this.rename = null; this.error = null; }),
+      command(["left", "right"], "caret", (data) => this.editInput(data)),
+      command(["home", "end"], "first / last character", (data) => this.editInput(data), false),
+    ];
+    if (this.confirmation) return [
+      command(["up", "down", "left", "right", "tab", "j", "k"], "choose", (data) => {
+        if (matchesKey(data, "tab")) this.confirmation!.confirm = !this.confirmation!.confirm;
+        else this.confirmation!.confirm = data === "j" || matchesKey(data, "down") || matchesKey(data, "right");
+      }),
+      command(["return"], "confirm", () => this.confirm(this.confirmation!.confirm)),
+      command(["escape"], "cancel", () => { this.confirmation = null; }),
+    ];
+    if (this.searching) return [
+      command(["up", "down"], "pick", (data) => this.move(matchesKey(data, "up") ? -1 : 1)),
+      command(["return"], "open", open),
+      command(["escape"], "clear", clearSearch),
+      command(["left", "right"], "caret", (data) => this.editInput(data), false),
+      command(["home", "end"], "first / last character", (data) => this.editInput(data), false),
+    ];
+    const row = this.selectedRow();
+    return [
+      ...(row ? [
+        command(["up", "down", "j", "k"], "move", (data) => {
+          this.pendingG = false;
+          this.move(data === "k" || matchesKey(data, "up") ? -1 : 1);
+        }),
+        command(["g", "G"], "first / last", (data) => {
+          if (data === "G") this.jumpToEdge("last");
+          else if (this.pendingG) {
+            this.pendingG = false;
+            if (this.gTimer) clearTimeout(this.gTimer);
+            this.jumpToEdge("first");
+          } else {
+            this.pendingG = true;
+            if (this.gTimer) clearTimeout(this.gTimer);
+            this.gTimer = setTimeout(() => (this.pendingG = false), 500);
+          }
+        }, false, "gg/G"),
+        command(["return"], "open", open),
+        command(["r"], "rename", () => { this.rename = { row, draft: row.name, cursor: row.name.length }; }),
+        command(["X"], row.state === "working" ? "interrupt" : row.state === "idle" ? "exit" : "delete", () => this.pressX()),
+      ] : []),
+      command(["/"], "search", () => { this.searching = true; this.queryCursor = this.query.length; }),
+      command(["R"], "rescan closed", async () => {
+        try { await this.options.actions.rescan(); }
+        catch (error) { this.error = error instanceof Error ? error.message : String(error); }
+      }, false),
+      command(["?"], "keys", () => { this.help = true; this.helpScroll = 0; }),
+      ...(this.query ? [command(["escape"], "clear filter", clearSearch)] : []),
+      command(this.query ? ["q", "left"] : ["q", "escape", "left"], "close", () => this.options.close(), false),
+    ];
+  }
 
   /** One hint: dim key, muted action. */
   private keyHint(theme: any, key: string, action: string): string {
@@ -387,36 +465,11 @@ export class SessionsPanel {
     return parts.map(([key, action]) => this.keyHint(theme, key, action)).join(theme.fg("muted", " · "));
   }
 
-  /**
-   * The hint row, which must say what the keys do *in this mode*.
-   *
-   * A single static line was wrong twice over: it never mentioned r or X, and
-   * inside search or rename the arrow keys do not close the panel at all.
-   */
   private hint(theme: any): string {
-    if (this.help) {
-      return this.helpOverflow
-        ? this.hints(theme, [["j/k", "scroll"], ["any other key", "close"]])
-        : this.keyHint(theme, "any key", "close this list");
-    }
-    if (this.rename) {
-      return this.hints(theme, [["enter", "save"], ["esc", "cancel"], ["←/→", "caret"]]);
-    }
-    if (this.confirmation) {
-      return this.hints(theme, [["↑/↓", "choose"], ["tab", "switch"], ["enter", "confirm"], ["esc", "cancel"]]);
-    }
-    if (this.searching) {
-      return this.hints(theme, [["↑/↓", "pick"], ["enter", "open"], ["esc", "clear"]]);
-    }
-    const state = this.selectedRow()?.state;
-    const parts: [string, string][] = [];
-    if (state) parts.push(["j/k", "move"], ["enter", "open"], ["r", "rename"], ["X", state === "working" ? "interrupt" : state === "idle" ? "exit" : "delete"]);
-    parts.push(["/", "search"], ["?", "keys"]);
-    if (this.query) parts.push(["esc", "clear filter"]);
-    return this.hints(theme, parts);
+    return this.hints(theme, this.commands().filter((command) => command.footer)
+      .map((command) => [commandKey(command), command.action]));
   }
 
-  /** The body of the help screen: one key column, one action column. */
   /**
    * The help screen: one key column, one action column, wrapped into as many
    * columns as the panel can carry.
@@ -427,7 +480,7 @@ export class SessionsPanel {
    * scrolls instead of lying about how many keys exist.
    */
   private helpBody(theme: any, inner: number, rows: number): string[] {
-    const keys = SessionsPanel.KEY_LIST;
+    const keys = this.commands(false).map((command): [string, string] => [commandKey(command), command.action]);
     const keyWidth = Math.max(...keys.map(([k]) => visibleWidth(k))) + 2;
     const cell = (key: string, action: string) =>
       theme.fg("dim", padEndVisible(key, keyWidth)) + theme.fg("muted", action);
@@ -458,201 +511,51 @@ export class SessionsPanel {
     return lines;
   }
 
-  async handleInput(data: string): Promise<void> {
-    // While the key list is open it is the only thing that reacts, and any key
-    // closes it: reading the list and then hunting for the same key again would
-    // be an extra step for no reason.
-    if (this.help) {
-      // j/k scroll the list when it does not fit; anything else closes it.
-      if (data === "j" || matchesKey(data, "down")) {
-        this.helpScroll++;
-        return;
+  private async saveRename(): Promise<void> {
+    const { row, draft } = this.rename!;
+    const next = draft.trim();
+    if (!next) { this.error = "A session needs a name."; return; }
+    try {
+      if (next !== row.name) {
+        await this.options.actions.rename(row, next);
+        this.revision++;
       }
-      if (data === "k" || matchesKey(data, "up")) {
-        this.helpScroll = Math.max(0, this.helpScroll - 1);
-        return;
-      }
-      this.help = false;
-      this.helpScroll = 0;
-      return;
+      this.rename = null;
+      this.error = null;
+    } catch (error) {
+      this.error = error instanceof Error ? error.message : String(error);
     }
+  }
 
+  private editInput(data: string): void {
     if (this.rename) {
-      if (matchesKey(data, "escape")) {
-        this.rename = null;
-        this.error = null;
-        return;
-      }
-      if (data === "\r" || data === "\n" || matchesKey(data, "return")) {
-        const { row, draft } = this.rename;
-        const next = draft.trim();
-        // An empty name is refused rather than closing the box: a silent no-op
-        // looks like the save worked, and the user walks away believing it did.
-        if (!next) {
-          this.error = "A session needs a name.";
-          return;
-        }
-        if (next === row.name) {
-          this.rename = null;
-          this.error = null;
-          return;
-        }
-        try {
-          await this.options.actions.rename(row, next);
-          this.rename = null;
-          this.error = null;
-          // The name is in the row set now, but the data fingerprint samples only
-          // numbers. This makes the change visible on the very next frame.
-          this.revision++;
-        } catch (error) {
-          this.error = error instanceof Error ? error.message : String(error);
-        }
-        return;
-      }
       const edited = this.editText(this.rename.draft, this.rename.cursor, data);
       if (edited) {
         if (edited.value !== this.rename.draft) this.error = null;
         this.rename.draft = edited.value;
         this.rename.cursor = edited.cursor;
       }
-      return;
-    }
-
-    if (this.confirmation) {
-      if (matchesKey(data, "escape")) {
-        this.confirmation = null;
-      } else if (data === "j" || matchesKey(data, "down") || matchesKey(data, "right")) {
-        this.confirmation.confirm = true;
-      } else if (data === "k" || matchesKey(data, "up") || matchesKey(data, "left")) {
-        this.confirmation.confirm = false;
-      } else if (data === "\t") {
-        this.confirmation.confirm = !this.confirmation.confirm;
-      } else if (data === "\r" || data === "\n" || matchesKey(data, "return")) {
-        await this.confirm(this.confirmation.confirm);
-      }
-      return;
-    }
-
-    if (this.searching) {
-      if (matchesKey(data, "escape")) {
-        this.query = "";
-        this.queryCursor = 0;
-        this.searching = false;
-        this.selected = null;
-        this.clampSelection();
-        return;
-      }
-      if (data === "\r" || data === "\n" || matchesKey(data, "return")) {
-        this.searching = false;
-        this.clampSelection();
-        const row = this.selectedRow();
-        if (row) await this.open(row);
-        return;
-      }
-      // The arrows belong to the result list, not to the query: the query is
-      // typed, but the thing being chosen is a row. Swallowing them here is what
-      // made "search, then pick a result" impossible.
-      if (matchesKey(data, "up")) {
-        this.move(-1);
-        return;
-      }
-      if (matchesKey(data, "down")) {
-        this.move(1);
-        return;
-      }
-      const before = this.query;
+    } else if (this.searching) {
       const edited = this.editText(this.query, this.queryCursor, data);
-      if (edited) {
-        this.query = edited.value;
-        this.queryCursor = edited.cursor;
-      }
-      // Only re-anchor the selection when the result set can actually change.
-      if (this.query !== before) {
-        this.selected = null;
-        this.clampSelection();
-      }
-      return;
-    }
-
-    this.error = null;
-    // The selection is normally set by the first render, but a key can arrive
-    // before it (the host renders once after the overlay mounts). Clamping here
-    // makes every mode work on the first keystroke.
-    this.clampSelection();
-    const row = this.selectedRow();
-
-    if (matchesKey(data, "escape") && this.query) {
-      this.query = "";
-      this.queryCursor = 0;
-      this.selected = null;
-      this.clampSelection();
-      return;
-    }
-    if (data === "q" || matchesKey(data, "escape")) {
-      this.options.close();
-      return;
-    }
-    if (data === "j" || matchesKey(data, "down")) {
-      this.pendingG = false;
-      this.move(1);
-      return;
-    }
-    if (data === "k" || matchesKey(data, "up")) {
-      this.pendingG = false;
-      this.move(-1);
-      return;
-    }
-    if (data === "g") {
-      if (this.pendingG) {
-        this.pendingG = false;
-        this.gTimer && clearTimeout(this.gTimer);
-        this.jumpToEdge("first");
-      } else {
-        this.pendingG = true;
-        this.gTimer && clearTimeout(this.gTimer);
-        this.gTimer = setTimeout(() => (this.pendingG = false), 500);
-      }
-      return;
-    }
-    if (data === "G") {
-      this.jumpToEdge("last");
-      return;
-    }
-    if (data === "R") {
-      try {
-        await this.options.actions.rescan();
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : String(error);
-      }
-      return;
-    }
-    if (data === "/") {
-      this.searching = true;
-      this.queryCursor = this.query.length;
-      return;
-    }
-    if (data === "?") {
-      this.help = true;
-      this.helpScroll = 0;
-      return;
-    }
-    if (!row) return;
-
-    if (data === "\r" || data === "\n" || matchesKey(data, "return")) {
-      await this.open(row);
-      return;
-    }
-    if (data === "X") {
-      await this.pressX();
-      return;
-    }
-    if (data === "r") {
-      this.rename = { row, draft: row.name, cursor: row.name.length };
-      return;
+      if (!edited) return;
+      const changed = edited.value !== this.query;
+      this.query = edited.value;
+      this.queryCursor = edited.cursor;
+      if (changed) { this.selected = null; this.clampSelection(); }
     }
   }
 
-  /** The left-arrow gesture must not steal a key the panel is using as text. */
+  async handleInput(data: string): Promise<void> {
+    if (!this.help && !this.rename && !this.searching && !this.confirmation) {
+      this.error = null;
+      this.clampSelection();
+    }
+    const command = this.commands().find((command) => commandMatches(command, data));
+    if (command) await command.run(data);
+    else if (this.rename || this.searching) this.editInput(data);
+  }
+
+  /** Whether a text field or modal view is active. */
   isEditingText(): boolean {
     return this.searching || this.rename !== null || this.help || this.confirmation !== null;
   }

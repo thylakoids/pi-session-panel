@@ -9,7 +9,6 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
-import { matchesKey } from "@earendil-works/pi-tui";
 import { createGestureEditor } from "./editor.ts";
 import { SessionsPanel } from "./panel.ts";
 import { closedScanDir, insertClosed, scanClosed, type ClosedIndex } from "./closed.ts";
@@ -237,14 +236,6 @@ export default function (pi: ExtensionAPI) {
               return panel.render(theme, columns, height());
             },
             handleInput: (data: string) => {
-              // The left-arrow gesture closes the panel, but a text field is using
-              // the arrows to move a caret. Closing out from under someone typing a
-              // name is the worst possible answer to that key.
-              if (matchesKey(data, "left") && !panel.isEditingText()) {
-                close();
-                tui.requestRender();
-                return;
-              }
               const pending = panel.handleInput(data);
               tui.requestRender();
               void pending.finally(() => tui.requestRender());

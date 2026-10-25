@@ -541,7 +541,51 @@ test("the ? help screen lists r rename and closes on the next key", () => {
   assert.match(screen, /Keys/, "the title says what this is");
   // The next key must be consumed by the help screen, not act on the list.
   instance.handleInput("X");
-  assert.ok(!instance.render(theme, 100, 24).join("\n").includes("this list"), "any key closes it");
+  assert.doesNotMatch(instance.render(theme, 100, 24).join("\n"), /─ Keys /, "any key closes help");
+});
+
+test("help groups movement aliases and reflects the selected action", async () => {
+  const { instance } = panel(() => [row({ key: "live:1", state: "working" }), row({ key: "closed:1", state: "closed" })]);
+  await instance.handleInput("?");
+  const working = instance.render(theme, 120, 24).join("\n");
+  assert.match(working, /↑\/↓\/j\/k\s+move/);
+  assert.doesNotMatch(working, /move too|open it|this list/);
+  assert.match(working, /X\s+interrupt/);
+  await instance.handleInput("\x1b");
+  await instance.handleInput("j");
+  await instance.handleInput("?");
+  const closed = instance.render(theme, 120, 24).join("\n");
+  assert.match(closed, /X\s+delete/);
+  assert.doesNotMatch(closed, /X\s+interrupt/);
+});
+
+test("delete footer groups all selection keys under one action", async () => {
+  const { instance } = panel(() => [row({ state: "closed" })]);
+  await instance.handleInput("X");
+  const screen = instance.render(theme, 120, 24).join("\n");
+  assert.match(screen, /↑\/↓\/←\/→\/tab\/j\/k choose/);
+  assert.doesNotMatch(screen, /switch/);
+});
+
+test("pasted key names remain text in rename", async () => {
+  const renamed: string[] = [];
+  const { instance } = panel(() => [row({ name: "a" })], { rename: (_row: any, next: string) => renamed.push(next) });
+  await instance.handleInput("r");
+  await instance.handleInput("return");
+  await instance.handleInput("left");
+  assert.deepEqual(renamed, [], "pasted words must not trigger named keys");
+  await instance.handleInput("\r");
+  assert.deepEqual(renamed, ["areturnleft"]);
+});
+
+test("the panel dispatches left itself and help consumes it", async () => {
+  const { instance, calls } = panel(() => [row()]);
+  await instance.handleInput("?");
+  instance.render(theme, 120, 24);
+  await instance.handleInput("\x1b[D");
+  assert.deepEqual(calls, [], "left closes help first");
+  await instance.handleInput("\x1b[D");
+  assert.deepEqual(calls, ["close"], "left in the list closes the panel");
 });
 
 test("the hint row says what the keys do in the current mode", () => {
