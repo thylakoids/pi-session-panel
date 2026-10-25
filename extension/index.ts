@@ -181,7 +181,7 @@ export default function (pi: ExtensionAPI) {
   // ── rows ────────────────────────────────────────────────────────────────────
   const rows = (): SessionRow[] => {
     const { live } = readRegistry(registry);
-    const liveRows = dedupeLive(live).map(rowFromRecord);
+    const liveRows = dedupeLive(live).map(record => rowFromRecord(record, self));
     return [...liveRows, ...withoutLiveDuplicates(closedIndex?.rows ?? [], liveRows)];
   };
 

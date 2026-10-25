@@ -300,6 +300,7 @@ export class SessionsPanel {
    */
   private clampSelection(): void {
     const rows = this.selectable();
+    if (this.selected === null && !this.query) this.selected = rows.find(node => node.row?.current)?.id ?? null;
     const selectedIndex = rows.findIndex((n) => n.id === this.selected);
     if (selectedIndex >= 0) {
       this.selectedIndex = selectedIndex;
@@ -703,7 +704,7 @@ export class SessionsPanel {
     let hash = rows.length;
     for (let i = 0; i < limit; i++) {
       const row = rows[i]!;
-      hash = (Math.imul(hash, 31) + row.updatedAt + row.state.length + row.name.length + (row.workingSince ?? 0)) | 0;
+      hash = (Math.imul(hash, 31) + row.updatedAt + row.state.length + row.name.length + (row.workingSince ?? 0) + Number(Boolean(row.current))) | 0;
     }
     return hash;
   }
@@ -847,9 +848,11 @@ export class SessionsPanel {
         const right = rightWidth ? (folderWidth ? padEndVisible(folder, folderWidth) + "  " : "") + padStartVisible(age, ageWidth) + " " : "";
         const glyph = row.state === "working" ? spinnerFrame(at) : STATE_GLYPH[row.state];
         const styledGlyph = theme.fg(row.state === "working" ? "success" : row.state === "idle" ? "accent" : "dim", glyph);
+        const current = row.current ? theme.bold(theme.fg("accent", "[current] ")) : "";
+        const name = row.current ? theme.bold(row.name) : row.name;
         const left = isSelected
-          ? `❯ ${glyph} ${row.name}`
-          : `  ${styledGlyph} ${theme.fg(identityColor(row), row.name)}`;
+          ? `❯ ${glyph} ${current}${name}`
+          : `  ${styledGlyph} ${current}${theme.fg(identityColor(row), name)}`;
         const clippedLeft = truncateToWidth(left, Math.max(1, inner - rightWidth - (rightWidth ? 2 : 0)), "…");
         const line = clippedLeft
           + " ".repeat(Math.max(0, inner - visibleWidth(clippedLeft) - rightWidth))

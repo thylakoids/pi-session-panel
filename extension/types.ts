@@ -6,6 +6,8 @@ export interface SessionRow {
   /** Stable identity for selection: registry pid for live rows, file path for closed. */
   key: string;
   state: SessionState;
+  /** The panel's host session, independent of the keyboard selection. */
+  current?: boolean;
   /** Display name, already resolved the way `pi -r` resolves it. */
   name: string;
   cwd: string;

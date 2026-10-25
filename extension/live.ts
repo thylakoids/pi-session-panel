@@ -82,12 +82,13 @@ function firstUserMessage(sessionFile: string): string | undefined {
  * one, else the first user message. A session that has not been used yet has
  * neither, and falls back to its directory.
  */
-export function rowFromRecord(record: RegistryRecord): SessionRow {
+export function rowFromRecord(record: RegistryRecord, host?: Pick<RegistryRecord, "pid" | "sessionFile">): SessionRow {
   const named = record.name?.trim();
   const fromFile = named ? undefined : record.sessionFile ? cachedFirstUserMessage(record.sessionFile) : undefined;
   return {
     key: `live:${record.pid}`,
     state: record.state,
+    current: Boolean(host && (record.pid === host.pid || (host.sessionFile && record.sessionFile === host.sessionFile))),
     // A session that has said nothing yet has no name and no first message. The
     // directory it happens to run in is not its name, so say what it is instead.
     name: named || fromFile || "(new session)",
