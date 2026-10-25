@@ -126,7 +126,69 @@ test("a CJK session name does not shift the right-hand columns", () => {
   assert.equal(starts[0], starts[1], "folder column must be aligned");
 });
 
-test("X interrupts a working row, exits an idle row, and confirms for a closed row", async () => {
+test("narrow lists give titles space before directory and age columns", () => {
+  const { instance } = panel(() => [row({ name: "A complete session title", cwd: "/tmp/VeryLongDirectory", updatedAt: Date.now() - 120_000 })]);
+  const lines = instance.render(theme, 40, 12);
+  assertWidths(lines, 40);
+  assert.match(lines.join("\n"), /A complete session title/);
+  assert.doesNotMatch(lines.join("\n"), /VeryLongDirectory|2m/);
+});
+
+test("selection fills the content width and identity colors survive rename and reopening", () => {
+  const foregrounds: { token: string; text: string }[] = [];
+  const backgrounds: { token: string; text: string }[] = [];
+  const painted = { ...theme,
+    fg: (token: string, text: string) => { foregrounds.push({ token, text }); return text; },
+    bg: (token: string, text: string) => { backgrounds.push({ token, text }); return text; },
+  };
+  let rows = [row({ key: "live:anchor", name: "anchor" }), row({ key: "closed:target", state: "closed", sessionFile: "/tmp/target.jsonl", name: "before" })];
+  const { instance } = panel(() => rows);
+  instance.render(painted, 80, 12);
+  const identity = foregrounds.find(({ text }) => text === "before")?.token;
+  assert.match(identity ?? "", /^syntax/);
+  assert.ok(backgrounds.some(({ token, text }) => token === "selectedBg" && text.startsWith("❯ · anchor") && visibleWidth(text) === 76));
+  assert.ok(foregrounds.some(({ token, text }) => token === "dim" && text === "○"));
+
+  rows = [rows[0]!, row({ key: "live:42", sessionFile: "/tmp/target.jsonl", name: "after", state: "working", updatedAt: Date.now() + 1 })];
+  foregrounds.length = 0;
+  instance.render(painted, 80, 12);
+  assert.equal(foregrounds.find(({ text }) => text === "after")?.token, identity);
+  assert.ok(foregrounds.some(({ token }) => token === "success"), "working indicator uses its status color");
+});
+
+test("background refresh preserves group order, selection and an active rename draft", async () => {
+  let rows = [row({ key: "live:1", name: "first" }), row({ key: "live:2", name: "second" })];
+  const { instance } = panel(() => rows);
+  instance.render(theme, 80, 12);
+  await instance.handleInput("j");
+  await instance.handleInput("r");
+  await instance.handleInput("X");
+  rows = [rows[1]!, row({ key: "live:3", name: "new" }), rows[0]!];
+  const lines = instance.render(theme, 80, 12);
+  assert.deepEqual(instance.nodes().filter((node) => node.kind === "row").map((node) => node.id), ["live:1", "live:2", "live:3"]);
+  assert.equal(instance.selectedKey(), "live:2");
+  assert.match(lines.join("\n"), /secondX/);
+});
+
+test("paging includes section headings and shows overflow at the edges", async () => {
+  const rows = [
+    ...Array.from({ length: 3 }, (_, index) => row({ key: `working:${index}`, state: "working" })),
+    ...Array.from({ length: 2 }, (_, index) => row({ key: `idle:${index}` })),
+    ...Array.from({ length: 3 }, (_, index) => row({ key: `closed:${index}`, state: "closed" })),
+  ];
+  const { instance } = panel(() => rows);
+  const first = instance.render(theme, 80, 10);
+  assert.ok(first.at(-2)!.endsWith("↓ │"));
+  assert.ok(!first[1]!.includes("↑"));
+  await instance.handleInput("\x1b[6~");
+  assert.equal(instance.selectedKey(), "idle:1", "one page counts headers as screen rows");
+  await instance.handleInput("G");
+  const last = instance.render(theme, 80, 10);
+  assert.ok(last[1]!.includes("↑"));
+  assert.ok(!last.at(-2)!.endsWith("↓ │"));
+});
+
+test("x interrupts a working row, exits an idle row, and confirms for a closed row", async () => {
   const rows = [
     row({ key: "live:1", state: "working", workingSince: Date.now() - 1000 }),
     row({ key: "live:2", state: "idle" }),
@@ -136,14 +198,17 @@ test("X interrupts a working row, exits an idle row, and confirms for a closed r
   instance.render(theme, 100, 20);
 
   await instance.handleInput("X");
+  assert.deepEqual(calls, [], "the action key is lowercase x");
+
+  await instance.handleInput("x");
   assert.deepEqual(calls, ["interrupt"], "working row must interrupt");
 
   await instance.handleInput("j");
-  await instance.handleInput("X");
+  await instance.handleInput("x");
   assert.deepEqual(calls, ["interrupt", "exit"], "idle row must exit");
 
   await instance.handleInput("j");
-  await instance.handleInput("X");
+  await instance.handleInput("x");
   assert.deepEqual(calls, ["interrupt", "exit"], "closed row must not act before confirmation");
 
   await instance.handleInput("j");
@@ -153,12 +218,12 @@ test("X interrupts a working row, exits an idle row, and confirms for a closed r
 
 test("delete confirmation arrows choose and Tab toggles", async () => {
   const { instance, calls } = panel(() => [row({ state: "closed" })]);
-  await instance.handleInput("X");
+  await instance.handleInput("x");
   await instance.handleInput("\x1b[C");
   await instance.handleInput("\x1b[D");
   await instance.handleInput("\r");
   assert.deepEqual(calls, [], "left selects Cancel instead of dismissing or deleting");
-  await instance.handleInput("X");
+  await instance.handleInput("x");
   await instance.handleInput("\t");
   await instance.handleInput("\r");
   assert.deepEqual(calls, ["remove"], "Tab moves to Delete");
@@ -166,7 +231,7 @@ test("delete confirmation arrows choose and Tab toggles", async () => {
 
 test("delete choices stay visible when the panel is short", async () => {
   const { instance } = panel(() => [row({ state: "closed", sessionFile: "/" + "very-long-directory/".repeat(20) + "session.jsonl" })]);
-  await instance.handleInput("X");
+  await instance.handleInput("x");
   const lines = instance.render(theme, 40, 9);
   assertWidths(lines, 40);
   assert.match(lines.join("\n"), /Cancel/);
@@ -177,7 +242,7 @@ test("deleting a row immediately selects its neighbour without waiting for rende
   let rows = [row({ key: "closed:1", state: "closed" }), row({ key: "closed:2", state: "closed" })];
   const { instance } = panel(() => rows, { remove: (removed: any) => { rows = rows.filter((entry) => entry.key !== removed.key); } });
   instance.render(theme, 80, 12);
-  await instance.handleInput("X");
+  await instance.handleInput("x");
   await instance.handleInput("\t");
   await instance.handleInput("\r");
   assert.equal(instance.selectedKey(), "closed:2");
@@ -203,6 +268,25 @@ test("Enter on a live row jumps to its pane", async () => {
   instance.render(theme, 100, 20);
   await instance.handleInput("\r");
   assert.deepEqual(calls, ["focus", "close"]);
+});
+
+test("right opens a list selection but remains caret movement while editing", async () => {
+  for (const state of ["idle", "closed"]) {
+    const { instance, calls } = panel(() => [row({ state })]);
+    await instance.handleInput("\x1b[C");
+    assert.deepEqual(calls, [state === "closed" ? "reopen" : "focus", "close"]);
+  }
+  const { instance, calls } = panel(() => [row({ name: "abc" })]);
+  await instance.handleInput("r");
+  await instance.handleInput("\x1b[D");
+  await instance.handleInput("\x1b[C");
+  assert.deepEqual(calls, []);
+  await instance.handleInput("\x1b");
+  await instance.handleInput("/");
+  await instance.handleInput("a");
+  await instance.handleInput("\x1b[D");
+  await instance.handleInput("\x1b[C");
+  assert.deepEqual(calls, []);
 });
 
 test("R rescans and / searches", async () => {
@@ -657,20 +741,20 @@ test("help groups movement aliases and reflects the selected action", async () =
   const working = instance.render(theme, 120, 24).join("\n");
   assert.match(working, /↑\/↓\/j\/k\s+move/);
   assert.doesNotMatch(working, /move too|open it|this list/);
-  assert.match(working, /X\s+interrupt/);
+  assert.match(working, /x\s+interrupt/);
   await instance.handleInput("\x1b");
   await instance.handleInput("j");
   await instance.handleInput("?");
   const closed = instance.render(theme, 120, 24).join("\n");
-  assert.match(closed, /X\s+delete/);
-  assert.doesNotMatch(closed, /X\s+interrupt/);
+  assert.match(closed, /x\s+delete/);
+  assert.doesNotMatch(closed, /x\s+interrupt/);
 });
 
 test("delete footer groups all selection keys under one action", async () => {
   const { instance } = panel(() => [row({ state: "closed" })]);
-  await instance.handleInput("X");
+  await instance.handleInput("x");
   const screen = instance.render(theme, 120, 24).join("\n");
-  assert.match(screen, /↑\/↓\/←\/→\/tab\/j\/k choose/);
+  assert.match(screen, /↑\/↓\/tab choose/);
   assert.doesNotMatch(screen, /switch/);
 });
 
@@ -687,6 +771,8 @@ test("pasted key names remain text in rename", async () => {
 
 test("the panel dispatches left itself and help consumes it", async () => {
   const { instance, calls } = panel(() => [row()]);
+  await instance.handleInput("\x1b[1;1:2D");
+  assert.deepEqual(calls, [], "holding the opening key must not immediately close the panel");
   await instance.handleInput("?");
   instance.render(theme, 120, 24);
   await instance.handleInput("\x1b[D");
@@ -699,7 +785,8 @@ test("the hint row says what the keys do in the current mode", () => {
   const rows = [row({ key: "live:1", name: "alpha" })];
   const { instance } = panel(() => rows);
   const normal = instance.render(theme, 120, 24).join("\n");
-  assert.match(normal, /r rename/, "the list hint must mention rename");
+  assert.match(normal, /enter\/→ open/, "the list hint advertises both ways to open");
+  assert.match(normal, /\? keys/, "complete actions remain available in help");
   instance.handleInput("/");
   const searching = instance.render(theme, 120, 24).join("\n");
   assert.match(searching, /↑\/↓/, "arrow keys use compact glyphs");
@@ -709,6 +796,22 @@ test("the hint row says what the keys do in the current mode", () => {
   instance.handleInput("\x1b");
   instance.handleInput("r");
   assert.match(instance.render(theme, 120, 24).join("\n"), /←\/→ caret/, "rename hints use arrow glyphs");
+});
+
+test("compact footers keep help visible and leave secondary actions in the key list", async () => {
+  const { instance } = panel(() => [row()]);
+  for (const width of [24, 40]) {
+    const lines = instance.render(theme, width, 12);
+    assertWidths(lines, width);
+    const footer = lines.at(-2)!;
+    assert.match(footer, /\? keys/);
+    assert.match(footer, /close/);
+    assert.doesNotMatch(footer, /rename|interrupt|delete/);
+  }
+  await instance.handleInput("?");
+  const help = instance.render(theme, 100, 24).join("\n");
+  assert.match(help, /r\s+rename/);
+  assert.match(help, /x\s+exit/);
 });
 
 test("a live session with no name reads (new session), not its directory", () => {

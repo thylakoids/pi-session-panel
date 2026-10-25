@@ -19,7 +19,7 @@ pi install ~/Agent/pi-session-panel
 ## 跑起来
 
 - `/sessions` 打开面板
-- 在输入框第一行行首再按一次 **左方向键** 打开面板
+- 输入框完全为空时按 **左方向键** 打开面板；有草稿、补全或粘贴时保留编辑行为
 - 面板里再按一次 **左方向键**、`Esc` 或 `q` 关闭
 
 ## 配置
@@ -42,7 +42,7 @@ pi install ~/Agent/pi-session-panel
 
 ## 三个分区
 
-| 分区 | 来源 | X 键的含义 |
+| 分区 | 来源 | x 键的含义 |
 |---|---|---|
 | Working | 注册表里 `state: "working"` 的进程 | 打断当前运行（向 tmux pane 发 Esc） |
 | Idle | 注册表里 `state: "idle"` 的进程 | 优雅退出（SIGTERM），立刻落入 Closed |
@@ -59,8 +59,8 @@ pi install ~/Agent/pi-session-panel
 | `j` / `k`、`↑` / `↓` | 上下移动。搜索中方向键选结果，`j` / `k` 是输入字符 |
 | `Home` / `End`、`gg` / `G` | 跳到第一行 / 最后一行；输入框中 `Home` / `End` 移动文字光标 |
 | `Page Up` / `Page Down` | 列表和搜索结果按可见高度翻页 |
-| `Enter` | Working、Idle：跳到那个 tmux pane；Closed：恢复到 tmux session `pi-sessions` 的新窗口 |
-| `X` | 见上表 |
+| `Enter` / `→`（列表中） | Working、Idle：跳到那个 tmux pane；Closed：恢复到 tmux session `pi-sessions` 的新窗口 |
+| `x` | 见上表；Closed 的删除仍需确认 |
 | `r` | 改名。`←` `→` `Home` `End` 移动光标，`Enter` 保存，`Esc` 取消 |
 | `/` | 搜索（与 `pi -r` 同一套：模糊词、`"短语"`、`re:正则`）。`↑` `↓` 选结果，`Enter` 直接打开，`Esc` 清空；无结果或打开失败时保持可编辑 |
 | `?` | 显示当前可用操作；内容过长时 `↑` / `↓`、`j` / `k` 滚动，其他键关闭 |
@@ -68,7 +68,9 @@ pi install ~/Agent/pi-session-panel
 | `q` / `Esc` | 关闭面板；有过滤条件时，`Esc` 先清空过滤 |
 | `←`（仅在列表里） | 关闭面板。在搜索或改名框里它是光标左移，不会关面板 |
 
-面板底部的提示会随模式变化，`X` 会显示当前选中会话对应的动作。
+底部优先显示关闭、帮助和打开等主要操作，并按宽度省略完整提示。`?` 显示全部按键，其中 `x` 的说明随选中会话显示打断、退出或删除。
+
+标题颜色按会话文件稳定分配，改名、排序和恢复会话不改变身份色；状态图标单独着色，选中项整行使用主题高亮。窗口变窄时依次隐藏目录、时间，优先保留标题。上下还有内容时显示滚动箭头，后台刷新保留同组行序、选择和输入状态。
 
 搜索和改名使用 pi-tui 原生输入框，支持粘贴、撤销和按单词编辑。动作执行期间显示进行状态，避免连续按键重复打开或提交。
 
@@ -102,7 +104,7 @@ npm test
 
 - [GLOSSARY.md](./GLOSSARY.md) — Session、Registry、Working、Idle、Closed、Unregistered
 - [docs/adr/0001](./docs/adr/0001-self-reported-registry-only.md) — 只认自报注册表，不做兜底
-- [docs/adr/0002](./docs/adr/0002-x-key-is-three-actions.md) — X 在三个分区里是三个动作
+- [docs/adr/0002](./docs/adr/0002-x-key-is-three-actions.md) — 状态动作键在三个分区里的含义
 - [docs/adr/0003](./docs/adr/0003-closed-index-in-memory.md) — closed 索引在内存里
 - [docs/adr/0004](./docs/adr/0004-left-arrow-gesture-editor.md) — 左方向键手势与全局编辑器替换
 - [docs/adr/0005](./docs/adr/0005-animation-costs-only-when-the-glyph-steps.md) — 动画只在字形真正变化时付出代价

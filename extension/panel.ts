@@ -5,7 +5,7 @@
  * the ones you act on; the closed section is long by nature and is the only
  * part that needs real scrolling.
  */
-import { Input, matchesKey, truncateToWidth as truncateGraphemes, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { decodeKittyPrintable, Input, isKeyRepeat, matchesKey, truncateToWidth as truncateGraphemes, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { SessionRow, SessionState } from "./types.ts";
 import { formatAge, formatElapsed, shortCwd } from "./format.ts";
 import { matchSearch, parseSearch } from "./search.ts";
@@ -63,6 +63,16 @@ const STATE_GLYPH: Record<Exclude<SessionState, "working">, string> = {
   idle: "·",
   closed: "○",
 };
+
+const IDENTITY_COLORS = ["syntaxKeyword", "syntaxFunction", "syntaxString", "syntaxNumber", "syntaxType", "syntaxVariable"] as const;
+
+function identityColor(row: SessionRow): typeof IDENTITY_COLORS[number] {
+  // The file survives reopening; the process key and title do not.
+  const identity = row.sessionFile ?? row.sessionId ?? row.key;
+  let hash = 0x811c9dc5;
+  for (const byte of new TextEncoder().encode(identity)) hash = Math.imul(hash ^ byte, 0x01000193) >>> 0;
+  return IDENTITY_COLORS[hash % IDENTITY_COLORS.length]!;
+}
 
 /**
  * The working glyph, following Claude Code 2.1.304.
@@ -168,7 +178,9 @@ interface PanelCommand {
   keys: string[];
   action: string;
   run(data: string): void | Promise<void>;
-  footer?: boolean;
+  /** True uses normal priority; numbers put primary actions first. */
+  footer?: boolean | number;
+  primaryKeys?: number;
   label?: string;
   fallback?: boolean;
 }
@@ -178,14 +190,19 @@ const KEY_LABELS: Record<string, string> = {
   pageUp: "pgup", pageDown: "pgdn",
 };
 
-function commandKey(command: PanelCommand): string {
-  return command.label ?? command.keys.map((key) => KEY_LABELS[key] ?? key).join("/");
+function commandKey(command: PanelCommand, compact = false): string {
+  const keys = compact ? command.keys.slice(0, command.primaryKeys) : command.keys;
+  return command.label ?? keys.map((key) => KEY_LABELS[key] ?? key).join("/");
+}
+
+function bindingMatches(data: string, key: string): boolean {
+  return (key.length === 1 && (data === key || decodeKittyPrintable(data) === key)) ||
+    (key === "return" && (data === "\r" || data === "\n")) ||
+    matchesKey(data, /^[A-Z]$/.test(key) ? `shift+${key.toLowerCase()}` : key);
 }
 
 function commandMatches(command: PanelCommand, data: string): boolean {
-  return command.fallback === true || command.keys.some((key) => (key.length === 1 && data === key) ||
-    (key === "return" && (data === "\r" || data === "\n")) ||
-    matchesKey(data, key));
+  return command.fallback === true || command.keys.some((key) => bindingMatches(data, key));
 }
 
 interface Confirmation {
@@ -225,6 +242,7 @@ export class SessionsPanel {
   private disposed = false;
   private pageSize = 10;
   private pasting = false;
+  private rowOrder = new Map<string, { state: SessionState; rank: number }>();
 
   constructor(options: PanelOptions) {
     this.options = options;
@@ -315,13 +333,27 @@ export class SessionsPanel {
     this.rememberSelection();
   }
 
+  private page(direction: -1 | 1): void {
+    const nodes = this.nodes();
+    const rows = nodes.map((node, position) => ({ node, position })).filter(({ node }) => node.kind === "row");
+    if (!rows.length) return;
+    const current = nodes.findIndex((node) => node.id === this.selected);
+    const target = current + direction * this.pageSize;
+    const next = direction > 0
+      ? rows.find(({ position }) => position >= target) ?? rows.at(-1)!
+      : rows.findLast(({ position }) => position <= target) ?? rows[0]!;
+    this.selected = next.node.id;
+    this.windowStart = Math.max(0, Math.min(this.windowStart + direction * this.pageSize, nodes.length - this.pageSize));
+    this.rememberSelection();
+  }
+
   private async open(row: SessionRow): Promise<void> {
     if (await this.act(() => (row.state === "closed" ? this.options.actions.reopen(row) : this.options.actions.focus(row)))) {
       this.searching = false;
     }
   }
 
-  /** X means three different things. See docs/adr/0002. */
+  /** x means three different things. See docs/adr/0002. */
   private async pressX(): Promise<void> {
     const row = this.selectedRow();
     if (!row) return;
@@ -355,8 +387,8 @@ export class SessionsPanel {
 
   /** One registry drives dispatch, help and mode-specific footer hints. */
   private commands(helpControls = true): PanelCommand[] {
-    const command = (keys: string[], action: string, run: PanelCommand["run"], footer = true, label?: string): PanelCommand =>
-      ({ keys, action, run, footer, label });
+    const command = (keys: string[], action: string, run: PanelCommand["run"], footer: boolean | number = true, label?: string, primaryKeys?: number): PanelCommand =>
+      ({ keys, action, run, footer, label, primaryKeys });
     if (this.help && helpControls) return [
       ...(this.helpOverflow ? [command(["up", "down", "j", "k"], "scroll", (data) => {
         this.helpScroll = Math.max(0, this.helpScroll + (matchesKey(data, "k") || matchesKey(data, "up") ? -1 : 1));
@@ -382,16 +414,16 @@ export class SessionsPanel {
       command(["home", "end"], "first / last character", (data) => this.editInput(data), false),
     ];
     if (this.confirmation) return [
-      command(["up", "down", "left", "right", "tab", "j", "k"], "choose", (data) => {
+      command(["up", "down", "tab", "left", "right", "j", "k"], "choose", (data) => {
         if (matchesKey(data, "tab")) this.confirmation!.confirm = !this.confirmation!.confirm;
         else this.confirmation!.confirm = matchesKey(data, "j") || matchesKey(data, "down") || matchesKey(data, "right");
-      }),
+      }, true, undefined, 3),
       command(["return"], "confirm", () => this.confirm(this.confirmation!.confirm)),
       command(["escape"], "cancel", () => { this.confirmation = null; }),
     ];
     if (this.searching) return [
       command(["up", "down"], "pick", (data) => this.move(matchesKey(data, "up") ? -1 : 1)),
-      command(["pageUp", "pageDown"], "page", (data) => this.move(matchesKey(data, "pageUp") ? -this.pageSize : this.pageSize), false),
+      command(["pageUp", "pageDown"], "page", (data) => this.page(matchesKey(data, "pageUp") ? -1 : 1), false),
       command(["return"], "open", open),
       command(["escape"], "clear", clearSearch),
       command(["left", "right"], "caret", (data) => this.editInput(data), false),
@@ -403,11 +435,11 @@ export class SessionsPanel {
         command(["up", "down", "j", "k"], "move", (data) => {
           this.pendingG = false;
           this.move(matchesKey(data, "k") || matchesKey(data, "up") ? -1 : 1);
-        }),
-        command(["pageUp", "pageDown"], "page", (data) => this.move(matchesKey(data, "pageUp") ? -this.pageSize : this.pageSize), false),
+        }, 40, undefined, 2),
+        command(["pageUp", "pageDown"], "page", (data) => this.page(matchesKey(data, "pageUp") ? -1 : 1), false),
         command(["home", "end", "g", "G"], "first / last", (data) => {
           if (matchesKey(data, "home")) this.jumpToEdge("first");
-          else if (matchesKey(data, "end") || matchesKey(data, "G")) this.jumpToEdge("last");
+          else if (matchesKey(data, "end") || bindingMatches(data, "G")) this.jumpToEdge("last");
           else if (this.pendingG) {
             this.pendingG = false;
             if (this.gTimer) clearTimeout(this.gTimer);
@@ -418,18 +450,20 @@ export class SessionsPanel {
             this.gTimer = setTimeout(() => (this.pendingG = false), 500);
           }
         }, false, "home/end/gg/G"),
-        command(["return"], "open", open),
-        command(["r"], "rename", () => { this.rename = { row, input: createInput(row.name) }; }),
-        command(["X"], row.state === "working" ? "interrupt" : row.state === "idle" ? "exit" : "delete", () => this.pressX()),
+        command(["return", "right"], "open", open, 30),
+        command(["r"], "rename", () => { this.rename = { row, input: createInput(row.name) }; }, false),
+        command(["x"], row.state === "working" ? "interrupt" : row.state === "idle" ? "exit" : "delete", () => this.pressX(), false),
       ] : []),
-      command(["/"], "search", () => { this.searching = true; this.searchInput = createInput(this.query); }),
+      command(["/"], "search", () => { this.searching = true; this.searchInput = createInput(this.query); }, 50),
       command(["R"], "rescan closed", async () => {
         try { await this.options.actions.rescan(); }
         catch (error) { this.error = error instanceof Error ? error.message : String(error); }
       }, false),
-      command(["?"], "keys", () => { this.help = true; this.helpScroll = 0; }),
-      ...(this.query ? [command(["escape"], "clear filter", clearSearch)] : []),
-      command(this.query ? ["q", "left"] : ["q", "escape", "left"], "close", () => this.options.close(), false),
+      command(["?"], "keys", () => { this.help = true; this.helpScroll = 0; }, 20),
+      ...(this.query ? [command(["escape"], "clear filter", clearSearch, 10)] : []),
+      command(this.query ? ["left", "q"] : ["escape", "left", "q"], "close", (data) => {
+        if (!isKeyRepeat(data)) this.options.close();
+      }, 10, undefined, 2),
     ];
   }
 
@@ -443,10 +477,20 @@ export class SessionsPanel {
     return parts.map(([key, action]) => this.keyHint(theme, key, action)).join(theme.fg("muted", " · "));
   }
 
-  private hint(theme: any): string {
-    if (this.busy) return theme.fg("muted", `${this.busy}…`);
-    return this.hints(theme, this.commands().filter((command) => command.footer)
-      .map((command) => [commandKey(command), command.action]));
+  private hint(theme: any, width: number): string {
+    if (this.busy) return truncateToWidth(theme.fg("muted", `${this.busy}…`), width);
+    const parts: [string, string][] = [];
+    const commands = this.commands().filter((command) => command.footer)
+      .sort((a, b) => (typeof a.footer === "number" ? a.footer : 50) - (typeof b.footer === "number" ? b.footer : 50));
+    for (const command of commands) {
+      const part: [string, string] = [commandKey(command, true), command.action];
+      if (visibleWidth(this.hints(theme, [...parts, part])) <= width) parts.push(part);
+      else if (command.keys.length > 1) {
+        part[0] = KEY_LABELS[command.keys[0]!] ?? command.keys[0]!;
+        if (visibleWidth(this.hints(theme, [...parts, part])) <= width) parts.push(part);
+      }
+    }
+    return this.hints(theme, parts);
   }
 
   /**
@@ -635,7 +679,14 @@ export class SessionsPanel {
    * shared by the key and the renderer.
    */
   private rowsForFrame(): SessionRow[] {
-    if (!this.frameRows) this.frameRows = this.options.rows();
+    if (!this.frameRows) {
+      const rank = (row: SessionRow): number => {
+        const previous = this.rowOrder.get(row.key);
+        return previous?.state === row.state ? previous.rank : Number.MAX_SAFE_INTEGER;
+      };
+      this.frameRows = [...this.options.rows()].sort((a, b) => SECTIONS.indexOf(a.state) - SECTIONS.indexOf(b.state) || rank(a) - rank(b));
+      this.rowOrder = new Map(this.frameRows.map((row, rank) => [row.key, { state: row.state, rank }]));
+    }
     return this.frameRows;
   }
 
@@ -661,7 +712,7 @@ export class SessionsPanel {
     const at = Date.now();
     this.frameRows = null;
     this.innerWidth = Math.max(1, width - 4);
-    this.pageSize = Math.max(1, this.bodyBudget(height, this.innerWidth).budget - 1);
+    this.pageSize = this.bodyBudget(height, this.innerWidth).budget;
     // Everything the key depends on is settled first. windowStart used to be
     // written inside renderFrame, after the key was taken, so the stored key
     // described the previous scroll position and every scroll cost a second,
@@ -731,6 +782,9 @@ export class SessionsPanel {
     const top = border(topBorder(title, info, width));
     const bottom = border("╰" + "─".repeat(Math.max(0, width - 2)) + "╯");
     const { budget, errorLines } = this.bodyBudget(height, inner);
+    const browsing = !this.help && !this.rename && !this.confirmation;
+    const hasAbove = browsing && this.windowStart > 0;
+    const hasBelow = browsing && this.windowStart + budget < total;
 
     let body: string[] = [];
     if (this.help) {
@@ -750,15 +804,15 @@ export class SessionsPanel {
       if (this.searching) body.push(this.searchInput.render(inner)[0]!);
       const nodes = this.nodes();
       const sample = nodes.filter((n) => n.kind === "row").slice(0, 200).map((n) => n.row!);
-      const folderWidth = Math.min(
+      const folderWidth = inner >= 68 ? Math.min(
         Math.max(0, ...sample.map((r) => visibleWidth(shortCwd(r.cwd)))),
         Math.max(4, Math.floor(inner * 0.32)),
-      );
-      const ageWidth = Math.min(
+      ) : 0;
+      const ageWidth = inner >= 52 ? Math.min(
         Math.max(0, ...sample.map((r) => visibleWidth(ageOf(r, at)))),
         Math.max(3, Math.floor(inner * 0.14)),
-      );
-      const rightWidth = sample.length ? folderWidth + 3 + ageWidth : 0;
+      ) : 0;
+      const rightWidth = sample.length && ageWidth ? ageWidth + 1 + (folderWidth ? folderWidth + 2 : 0) : 0;
 
       const rows = nodes.slice(this.windowStart, this.windowStart + budget);
       for (const node of rows) {
@@ -770,20 +824,17 @@ export class SessionsPanel {
         const isSelected = node.id === this.selected;
         const folder = truncateToWidth(shortCwd(row.cwd), folderWidth, "…");
         const age = truncateToWidth(ageOf(row, at), ageWidth, "…");
-        const right = padEndVisible(folder, folderWidth) + "  " + padStartVisible(age, ageWidth) + " ";
-        const pointer = isSelected ? theme.fg("accent", "❯") : " ";
-        const glyph =
-          row.state === "working"
-            ? theme.fg("accent", spinnerFrame(at))
-            : theme.fg(row.state === "idle" ? "muted" : "dim", STATE_GLYPH[row.state]);
-        const nameColor = isSelected ? "accent" : row.state === "closed" ? "muted" : "text";
-        const left = `${pointer} ${glyph} ${theme.fg(nameColor, row.name)}`;
-        const clippedLeft = truncateToWidth(left, Math.max(1, inner - rightWidth - 2));
-        body.push(
-          clippedLeft +
-            " ".repeat(Math.max(2, inner - visibleWidth(clippedLeft) - rightWidth)) +
-            theme.fg("dim", right),
-        );
+        const right = rightWidth ? (folderWidth ? padEndVisible(folder, folderWidth) + "  " : "") + padStartVisible(age, ageWidth) + " " : "";
+        const glyph = row.state === "working" ? spinnerFrame(at) : STATE_GLYPH[row.state];
+        const styledGlyph = theme.fg(row.state === "working" ? "success" : row.state === "idle" ? "accent" : "dim", glyph);
+        const left = isSelected
+          ? `❯ ${glyph} ${row.name}`
+          : `  ${styledGlyph} ${theme.fg(identityColor(row), row.name)}`;
+        const clippedLeft = truncateToWidth(left, Math.max(1, inner - rightWidth - (rightWidth ? 2 : 0)), "…");
+        const line = clippedLeft
+          + " ".repeat(Math.max(0, inner - visibleWidth(clippedLeft) - rightWidth))
+          + (isSelected ? right : theme.fg("dim", right));
+        body.push(isSelected ? theme.bg("selectedBg", theme.fg("text", line)) : line);
       }
       if (total === 0) body.push(theme.fg("dim", this.emptyMessage()));
     }
@@ -795,10 +846,11 @@ export class SessionsPanel {
     if (body.length > Math.max(1, height - 5)) body = body.slice(0, Math.max(1, height - 5));
     while (body.length < Math.max(1, height - 5)) body.push("");
 
-    const hint = truncateToWidth(this.hint(theme), inner);
+    const hintWidth = Math.max(0, inner - (hasBelow ? 2 : 0));
+    const hint = padEndVisible(this.hint(theme, hintWidth), hintWidth) + (hasBelow ? theme.fg("muted", " ↓") : "");
     const framed = [
       top,
-      border("│") + " ".repeat(Math.max(0, width - 2)) + border("│"),
+      border("│") + " " + padEndVisible(hasAbove ? theme.fg("muted", "↑") : "", inner) + " " + border("│"),
       ...body.map((line) => border("│") + " " + padEndVisible(truncateToWidth(line, inner), inner) + " " + border("│")),
       border("│") + " " + hint + " ".repeat(Math.max(0, inner - visibleWidth(hint))) + " " + border("│"),
       bottom,
