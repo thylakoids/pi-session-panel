@@ -414,7 +414,7 @@ export class SessionsPanel {
       command(["home", "end"], "first / last character", (data) => this.editInput(data), false),
     ];
     if (this.confirmation) return [
-      command(["up", "down", "tab", "left", "right", "j", "k"], "choose", (data) => {
+      command(["left", "right", "tab", "up", "down", "j", "k"], "choose", (data) => {
         if (matchesKey(data, "tab")) this.confirmation!.confirm = !this.confirmation!.confirm;
         else this.confirmation!.confirm = matchesKey(data, "j") || matchesKey(data, "down") || matchesKey(data, "right");
       }, true, undefined, 3),
@@ -709,6 +709,7 @@ export class SessionsPanel {
   }
 
   render(theme: any, width: number, height: number): string[] {
+    if (this.confirmation) height = Math.min(height, 12);
     const at = Date.now();
     this.frameRows = null;
     this.innerWidth = Math.max(1, width - 4);
@@ -757,6 +758,32 @@ export class SessionsPanel {
   /** Width last passed to render, so scrollIntoView can wrap the error line. */
   private innerWidth = 76;
 
+  private confirmationBody(theme: any, inner: number, budget: number): string[] {
+    const { row, confirm } = this.confirmation!;
+    const button = (label: string, selected: boolean, danger: boolean): string => {
+      const text = theme.fg(danger ? "error" : selected ? "text" : "muted", `[${selected ? "❯" : " "} ${label} ]`);
+      return selected ? theme.bg("selectedBg", theme.bold(text)) : text;
+    };
+    const cancel = button("Cancel", !confirm, false);
+    const remove = button("Delete", confirm, true);
+    const buttons = visibleWidth(cancel + "  " + remove) <= inner ? [cancel + "  " + remove] : [cancel, remove];
+    const available = Math.max(0, budget - buttons.length);
+    const details: string[] = [];
+    if (available) details.push(theme.bold(truncateToWidth(row.name, inner, "…")));
+    const warning = available >= 2;
+    const pathBudget = Math.min(3, Math.max(0, available - 1 - Number(warning) - Number(available >= 4) - Number(available >= 3)));
+    if (pathBudget) {
+      const path = wrapTextWithAnsi(row.sessionFile ?? row.cwd, inner);
+      const lines = path.slice(0, pathBudget);
+      if (path.length > lines.length) lines[lines.length - 1] = truncateToWidth(lines.at(-1)!, Math.max(0, inner - 1)) + "…";
+      details.push(...lines.map((line) => theme.fg("dim", line)));
+    }
+    if (available >= 4) details.push("");
+    if (warning) details.push(theme.fg("warning", "! Cannot be undone."));
+    if (available >= 3) details.push("");
+    return [...details, ...buttons];
+  }
+
   private renderFrame(theme: any, width: number, height: number, at: number): string[] {
     const inner = Math.max(1, width - 4);
     const border = (s: string) => theme.fg("accent", s);
@@ -770,7 +797,7 @@ export class SessionsPanel {
     const title = this.help
       ? "Keys"
       : this.confirmation
-        ? "Delete session"
+        ? theme.fg("error", "Delete permanently?")
       : this.rename
         ? "Rename session"
         : this.searching
@@ -779,7 +806,7 @@ export class SessionsPanel {
             ? `Sessions — filter: ${this.query}`
             : "Sessions";
 
-    const top = border(topBorder(title, info, width));
+    const top = border(topBorder(title, this.confirmation ? "" : info, width));
     const bottom = border("╰" + "─".repeat(Math.max(0, width - 2)) + "╯");
     const { budget, errorLines } = this.bodyBudget(height, inner);
     const browsing = !this.help && !this.rename && !this.confirmation;
@@ -790,14 +817,7 @@ export class SessionsPanel {
     if (this.help) {
       body = this.helpBody(theme, inner, Math.max(1, height - 5));
     } else if (this.confirmation) {
-      const { row, confirm } = this.confirmation;
-      const question = wrapTextWithAnsi(`${row.name}\nDelete this session file from disk?\n${row.sessionFile ?? row.cwd}\nThis cannot be undone.`, inner);
-      body = [
-        ...question.slice(0, Math.max(0, budget - 3)),
-        "",
-        `${!confirm ? theme.fg("accent", "❯") : " "} Cancel`,
-        `${confirm ? theme.fg("accent", "❯") : " "} Delete`,
-      ];
+      body = this.confirmationBody(theme, inner, budget);
     } else if (this.rename) {
       body = this.rename.input.render(inner);
     } else {
@@ -877,6 +897,7 @@ export class SessionsPanel {
    * changing, or a selection moving, none of which a glyph comparison would see.
    */
   needsRedraw(theme: any, width: number, height: number): boolean {
+    if (this.confirmation) height = Math.min(height, 12);
     this.frameRows = null;
     this.clampSelection();
     return this.frameKey(theme, width, height, Date.now()) !== this.frameCache?.key;

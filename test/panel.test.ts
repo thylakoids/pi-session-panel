@@ -232,10 +232,37 @@ test("delete confirmation arrows choose and Tab toggles", async () => {
 test("delete choices stay visible when the panel is short", async () => {
   const { instance } = panel(() => [row({ state: "closed", sessionFile: "/" + "very-long-directory/".repeat(20) + "session.jsonl" })]);
   await instance.handleInput("x");
-  const lines = instance.render(theme, 40, 9);
-  assertWidths(lines, 40);
-  assert.match(lines.join("\n"), /Cancel/);
-  assert.match(lines.join("\n"), /Delete/);
+  for (const width of [24, 40, 80]) {
+    for (const height of [8, 9, 12, 24]) {
+      const lines = instance.render(theme, width, height);
+      assertWidths(lines, width);
+      assert.ok(lines.length <= Math.min(height, 12), "confirmation stays compact");
+      assert.match(lines.join("\n"), /\[❯ Cancel \]/);
+      assert.match(lines.join("\n"), /\[\s+Delete \]/);
+    }
+  }
+});
+
+test("delete confirmation distinguishes the target, warning and selected destructive button", async () => {
+  const styles: { kind: string; token: string; text: string }[] = [];
+  const painted = { ...theme,
+    fg: (token: string, text: string) => { styles.push({ kind: "fg", token, text }); return text; },
+    bg: (token: string, text: string) => { styles.push({ kind: "bg", token, text }); return text; },
+    bold: (text: string) => { styles.push({ kind: "bold", token: "", text }); return text; },
+  };
+  const { instance, calls } = panel(() => [row({ state: "closed", name: "Target session", sessionFile: "/tmp/target.jsonl" })]);
+  await instance.handleInput("x");
+  instance.render(painted, 80, 24);
+  assert.ok(styles.some(({ kind, text }) => kind === "bold" && text === "Target session"));
+  assert.ok(styles.some(({ token, text }) => token === "dim" && text.includes("target.jsonl")));
+  assert.ok(styles.some(({ token, text }) => token === "warning" && text.includes("Cannot be undone")));
+  assert.ok(styles.some(({ kind, text }) => kind === "bg" && text.includes("❯ Cancel")));
+  await instance.handleInput("\t");
+  styles.length = 0;
+  instance.render(painted, 80, 24);
+  assert.ok(styles.some(({ kind, text }) => kind === "bg" && text.includes("❯ Delete")));
+  assert.ok(styles.some(({ token, text }) => token === "error" && text.includes("Delete")));
+  assert.deepEqual(calls, [], "selecting Delete still needs Enter to confirm");
 });
 
 test("deleting a row immediately selects its neighbour without waiting for render", async () => {
@@ -754,7 +781,7 @@ test("delete footer groups all selection keys under one action", async () => {
   const { instance } = panel(() => [row({ state: "closed" })]);
   await instance.handleInput("x");
   const screen = instance.render(theme, 120, 24).join("\n");
-  assert.match(screen, /↑\/↓\/tab choose/);
+  assert.match(screen, /←\/→\/tab choose/);
   assert.doesNotMatch(screen, /switch/);
 });
 
