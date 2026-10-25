@@ -848,16 +848,16 @@ export class SessionsPanel {
         const right = rightWidth ? (folderWidth ? padEndVisible(folder, folderWidth) + "  " : "") + padStartVisible(age, ageWidth) + " " : "";
         const glyph = row.state === "working" ? spinnerFrame(at) : STATE_GLYPH[row.state];
         const styledGlyph = theme.fg(row.state === "working" ? "success" : row.state === "idle" ? "accent" : "dim", glyph);
-        const current = row.current ? theme.bold(theme.fg("accent", "[current] ")) : "";
         const name = row.current ? theme.bold(row.name) : row.name;
         const left = isSelected
-          ? `❯ ${glyph} ${current}${name}`
-          : `  ${styledGlyph} ${current}${theme.fg(identityColor(row), name)}`;
+          ? `❯ ${glyph} ${name}`
+          : `  ${styledGlyph} ${theme.fg(identityColor(row), name)}`;
         const clippedLeft = truncateToWidth(left, Math.max(1, inner - rightWidth - (rightWidth ? 2 : 0)), "…");
         const line = clippedLeft
           + " ".repeat(Math.max(0, inner - visibleWidth(clippedLeft) - rightWidth))
           + (isSelected ? right : theme.fg("dim", right));
-        body.push(isSelected ? theme.bg("selectedBg", theme.fg("text", line)) : line);
+        const background = row.current ? "customMessageBg" : isSelected ? "selectedBg" : undefined;
+        body.push(background ? theme.bg(background, theme.fg("text", line)) : line);
       }
       if (total === 0) body.push(theme.fg("dim", this.emptyMessage()));
     }
