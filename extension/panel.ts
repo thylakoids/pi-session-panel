@@ -5,7 +5,7 @@
  * the ones you act on; the closed section is long by nature and is the only
  * part that needs real scrolling.
  */
-import { matchesKey, truncateToWidth as truncateGraphemes, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Input, matchesKey, truncateToWidth as truncateGraphemes, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { SessionRow, SessionState } from "./types.ts";
 import { formatAge, formatElapsed, shortCwd } from "./format.ts";
 import { matchSearch, parseSearch } from "./search.ts";
@@ -156,15 +156,12 @@ function padStartVisible(text: string, width: number): string {
   return " ".repeat(Math.max(0, width - visibleWidth(text))) + text;
 }
 
-const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-const graphemes = (value: string): string[] => [...graphemeSegmenter.segment(value)].map(({ segment }) => segment);
-
-function cursorText(value: string, cursor: number, width: number): string {
-  const atEnd = cursor === value.length;
-  const underCaret = atEnd ? " " : graphemes(value.slice(cursor))[0]!;
-  const head = truncateToWidth(value.slice(0, cursor), Math.max(1, width - visibleWidth(underCaret)), "…", true);
-  const tail = truncateToWidth(value.slice(cursor + (atEnd ? 0 : underCaret.length)), Math.max(0, width - visibleWidth(head) - visibleWidth(underCaret)), "…");
-  return `${head}\x1b[7m${underCaret}\x1b[27m${tail}`;
+function createInput(value = ""): Input {
+  const input = new Input({ prompt: "❯ " });
+  input.focused = true;
+  input.setValue(value);
+  input.handleInput("\x05"); // Start editing at the end using Input's public API.
+  return input;
 }
 
 interface PanelCommand {
@@ -178,6 +175,7 @@ interface PanelCommand {
 
 const KEY_LABELS: Record<string, string> = {
   up: "↑", down: "↓", left: "←", right: "→", return: "enter", escape: "esc",
+  pageUp: "pgup", pageDown: "pgdn",
 };
 
 function commandKey(command: PanelCommand): string {
@@ -187,7 +185,7 @@ function commandKey(command: PanelCommand): string {
 function commandMatches(command: PanelCommand, data: string): boolean {
   return command.fallback === true || command.keys.some((key) => (key.length === 1 && data === key) ||
     (key === "return" && (data === "\r" || data === "\n")) ||
-    (key.length > 1 && matchesKey(data, key)));
+    matchesKey(data, key));
 }
 
 interface Confirmation {
@@ -199,11 +197,11 @@ export class SessionsPanel {
   private readonly options: PanelOptions;
   private selected: string | null = null;
   private query = "";
-  private queryCursor = 0;
+  private searchInput = createInput();
   private searching = false;
   private confirmation: Confirmation | null = null;
   /** The rename draft and its caret, which the arrows move like any text field. */
-  private rename: { row: SessionRow; draft: string; cursor: number } | null = null;
+  private rename: { row: SessionRow; input: Input } | null = null;
   /** The key list, toggled with ?. */
   private help = false;
   /** First visible row of the key list, for panels too short to show it all. */
@@ -223,6 +221,10 @@ export class SessionsPanel {
   private error: string | null = null;
   private pendingG = false;
   private gTimer: ReturnType<typeof setTimeout> | null = null;
+  private busy: string | null = null;
+  private disposed = false;
+  private pageSize = 10;
+  private pasting = false;
 
   constructor(options: PanelOptions) {
     this.options = options;
@@ -280,7 +282,11 @@ export class SessionsPanel {
    */
   private clampSelection(): void {
     const rows = this.selectable();
-    if (rows.some((n) => n.id === this.selected)) return;
+    const selectedIndex = rows.findIndex((n) => n.id === this.selected);
+    if (selectedIndex >= 0) {
+      this.selectedIndex = selectedIndex;
+      return;
+    }
     const at = Math.max(0, Math.min(this.selectedIndex, rows.length - 1));
     this.selected = rows[at]?.id ?? null;
     if (rows.length === 0) this.windowStart = 0;
@@ -310,7 +316,9 @@ export class SessionsPanel {
   }
 
   private async open(row: SessionRow): Promise<void> {
-    await this.act(() => (row.state === "closed" ? this.options.actions.reopen(row) : this.options.actions.focus(row)));
+    if (await this.act(() => (row.state === "closed" ? this.options.actions.reopen(row) : this.options.actions.focus(row)))) {
+      this.searching = false;
+    }
   }
 
   /** X means three different things. See docs/adr/0002. */
@@ -338,42 +346,11 @@ export class SessionsPanel {
       // The row is gone; let clampSelection land on its neighbour rather than the
       // top of the list.
       this.revision++;
+      this.frameRows = null;
       this.clampSelection();
     } catch (error) {
       this.error = error instanceof Error ? error.message : String(error);
     }
-  }
-
-  /**
-   * A text field's response to one key, or undefined when the key is not text.
-   *
-   * The search box and the rename box are the same widget with a different label,
-   * so they share this: arrows move the caret, backspace deletes before it, delete
-   * deletes at it, home/end jump. Sharing it is what keeps the two from drifting —
-   * the rename box had no caret at all, and the search box had no arrow handling.
-   */
-  private editText(value: string, cursor: number, data: string): { value: string; cursor: number } | undefined {
-    // Move over complete visible characters, including emoji sequences and
-    // combining accents, rather than splitting their code points.
-    const chars = graphemes(value);
-    const before = graphemes(value.slice(0, cursor)).length;
-    const splice = (from: number, remove: number, insert = ""): { value: string; cursor: number } => {
-      const out = [...chars.slice(0, from), ...(insert ? [insert] : []), ...chars.slice(from + remove)];
-      const next = out.join("");
-      return { value: next, cursor: [...out.slice(0, from + (insert ? 1 : 0))].join("").length };
-    };
-    if (matchesKey(data, "left")) return before === 0 ? { value, cursor } : splice(before - 1, 0);
-    if (matchesKey(data, "right")) return before >= chars.length ? { value, cursor } : splice(before + 1, 0);
-    if (matchesKey(data, "home") || data === "\u0001") return { value, cursor: 0 };
-    if (matchesKey(data, "end") || data === "\u0005") return { value, cursor: value.length };
-    if (matchesKey(data, "backspace")) return before === 0 ? { value, cursor } : splice(before - 1, 1);
-    if (matchesKey(data, "delete")) return before >= chars.length ? { value, cursor } : splice(before, 1);
-    // A printable key is inserted at the caret, not appended: the caret is the
-    // point the user is looking at, and an edit must land there.
-    if (data.length >= 1 && !/^[\u0000-\u001f\u007f]+$/.test(data)) {
-      return splice(before, 0, data);
-    }
-    return undefined;
   }
 
   /** One registry drives dispatch, help and mode-specific footer hints. */
@@ -382,20 +359,18 @@ export class SessionsPanel {
       ({ keys, action, run, footer, label });
     if (this.help && helpControls) return [
       ...(this.helpOverflow ? [command(["up", "down", "j", "k"], "scroll", (data) => {
-        this.helpScroll = Math.max(0, this.helpScroll + (data === "k" || matchesKey(data, "up") ? -1 : 1));
+        this.helpScroll = Math.max(0, this.helpScroll + (matchesKey(data, "k") || matchesKey(data, "up") ? -1 : 1));
       })] : []),
       { keys: [], label: this.helpOverflow ? "any other key" : "any key", action: "close", footer: true, fallback: true,
         run: () => { this.help = false; this.helpScroll = 0; } },
     ];
     const clearSearch = () => {
       this.query = "";
-      this.queryCursor = 0;
+      this.searchInput = createInput();
       this.searching = false;
-      this.selected = null;
       this.clampSelection();
     };
     const open = async () => {
-      this.searching = false;
       this.clampSelection();
       const row = this.selectedRow();
       if (row) await this.open(row);
@@ -409,13 +384,14 @@ export class SessionsPanel {
     if (this.confirmation) return [
       command(["up", "down", "left", "right", "tab", "j", "k"], "choose", (data) => {
         if (matchesKey(data, "tab")) this.confirmation!.confirm = !this.confirmation!.confirm;
-        else this.confirmation!.confirm = data === "j" || matchesKey(data, "down") || matchesKey(data, "right");
+        else this.confirmation!.confirm = matchesKey(data, "j") || matchesKey(data, "down") || matchesKey(data, "right");
       }),
       command(["return"], "confirm", () => this.confirm(this.confirmation!.confirm)),
       command(["escape"], "cancel", () => { this.confirmation = null; }),
     ];
     if (this.searching) return [
       command(["up", "down"], "pick", (data) => this.move(matchesKey(data, "up") ? -1 : 1)),
+      command(["pageUp", "pageDown"], "page", (data) => this.move(matchesKey(data, "pageUp") ? -this.pageSize : this.pageSize), false),
       command(["return"], "open", open),
       command(["escape"], "clear", clearSearch),
       command(["left", "right"], "caret", (data) => this.editInput(data), false),
@@ -426,10 +402,12 @@ export class SessionsPanel {
       ...(row ? [
         command(["up", "down", "j", "k"], "move", (data) => {
           this.pendingG = false;
-          this.move(data === "k" || matchesKey(data, "up") ? -1 : 1);
+          this.move(matchesKey(data, "k") || matchesKey(data, "up") ? -1 : 1);
         }),
-        command(["g", "G"], "first / last", (data) => {
-          if (data === "G") this.jumpToEdge("last");
+        command(["pageUp", "pageDown"], "page", (data) => this.move(matchesKey(data, "pageUp") ? -this.pageSize : this.pageSize), false),
+        command(["home", "end", "g", "G"], "first / last", (data) => {
+          if (matchesKey(data, "home")) this.jumpToEdge("first");
+          else if (matchesKey(data, "end") || matchesKey(data, "G")) this.jumpToEdge("last");
           else if (this.pendingG) {
             this.pendingG = false;
             if (this.gTimer) clearTimeout(this.gTimer);
@@ -439,12 +417,12 @@ export class SessionsPanel {
             if (this.gTimer) clearTimeout(this.gTimer);
             this.gTimer = setTimeout(() => (this.pendingG = false), 500);
           }
-        }, false, "gg/G"),
+        }, false, "home/end/gg/G"),
         command(["return"], "open", open),
-        command(["r"], "rename", () => { this.rename = { row, draft: row.name, cursor: row.name.length }; }),
+        command(["r"], "rename", () => { this.rename = { row, input: createInput(row.name) }; }),
         command(["X"], row.state === "working" ? "interrupt" : row.state === "idle" ? "exit" : "delete", () => this.pressX()),
       ] : []),
-      command(["/"], "search", () => { this.searching = true; this.queryCursor = this.query.length; }),
+      command(["/"], "search", () => { this.searching = true; this.searchInput = createInput(this.query); }),
       command(["R"], "rescan closed", async () => {
         try { await this.options.actions.rescan(); }
         catch (error) { this.error = error instanceof Error ? error.message : String(error); }
@@ -466,6 +444,7 @@ export class SessionsPanel {
   }
 
   private hint(theme: any): string {
+    if (this.busy) return theme.fg("muted", `${this.busy}…`);
     return this.hints(theme, this.commands().filter((command) => command.footer)
       .map((command) => [commandKey(command), command.action]));
   }
@@ -512,8 +491,8 @@ export class SessionsPanel {
   }
 
   private async saveRename(): Promise<void> {
-    const { row, draft } = this.rename!;
-    const next = draft.trim();
+    const { row, input } = this.rename!;
+    const next = input.getValue().trim();
     if (!next) { this.error = "A session needs a name."; return; }
     try {
       if (next !== row.name) {
@@ -528,31 +507,47 @@ export class SessionsPanel {
   }
 
   private editInput(data: string): void {
-    if (this.rename) {
-      const edited = this.editText(this.rename.draft, this.rename.cursor, data);
-      if (edited) {
-        if (edited.value !== this.rename.draft) this.error = null;
-        this.rename.draft = edited.value;
-        this.rename.cursor = edited.cursor;
-      }
-    } else if (this.searching) {
-      const edited = this.editText(this.query, this.queryCursor, data);
-      if (!edited) return;
-      const changed = edited.value !== this.query;
-      this.query = edited.value;
-      this.queryCursor = edited.cursor;
-      if (changed) { this.selected = null; this.clampSelection(); }
+    const input = this.rename?.input ?? this.searchInput;
+    const before = input.getValue();
+    input.handleInput(data);
+    this.revision++; // Input owns its caret, undo and paste state.
+    if (input.getValue() === before) return;
+    this.error = null;
+    if (this.searching) {
+      this.query = input.getValue();
+      this.selected = null;
+      this.selectedIndex = 0;
+      this.windowStart = 0;
+      this.clampSelection();
     }
   }
 
   async handleInput(data: string): Promise<void> {
+    if (this.busy || this.disposed) return;
+    this.frameRows = null;
+    if ((this.rename || this.searching) && (this.pasting || data.includes("\x1b[200~"))) {
+      this.pasting = !data.includes("\x1b[201~");
+      this.editInput(data);
+      return;
+    }
+    if (!matchesKey(data, "g")) {
+      this.pendingG = false;
+      if (this.gTimer) clearTimeout(this.gTimer);
+      this.gTimer = null;
+    }
     if (!this.help && !this.rename && !this.searching && !this.confirmation) {
       this.error = null;
       this.clampSelection();
     }
     const command = this.commands().find((command) => commandMatches(command, data));
-    if (command) await command.run(data);
-    else if (this.rename || this.searching) this.editInput(data);
+    if (command) {
+      const pending = command.run(data);
+      if (pending) {
+        this.busy = command.action;
+        try { await pending; }
+        finally { this.busy = null; this.frameRows = null; }
+      }
+    } else if (this.rename || this.searching) this.editInput(data);
   }
 
   /** Whether a text field or modal view is active. */
@@ -570,12 +565,14 @@ export class SessionsPanel {
     return this.error;
   }
 
-  private async act(run: () => void | Promise<void>): Promise<void> {
+  private async act(run: () => void | Promise<void>): Promise<boolean> {
     try {
       await run();
       this.options.close();
+      return true;
     } catch (error) {
       this.error = error instanceof Error ? error.message : String(error);
+      return false;
     }
   }
 
@@ -601,16 +598,14 @@ export class SessionsPanel {
       theme?.appearance ?? "",
       this.selected ?? "",
       this.query,
-      // The caret is visible, so it belongs in the key: moving it must redraw, or
-      // the cursor sits still until something else happens to change.
-      this.queryCursor,
       this.searching ? 1 : 0,
       this.help ? 1 : 0,
       this.helpScroll,
-      this.revision,
-      this.rename ? `${this.rename.row.key}:${this.rename.draft}:${this.rename.cursor}` : "",
+      this.revision, // Also covers Input's private caret and undo state.
+      this.rename ? `${this.rename.row.key}:${this.rename.input.getValue()}` : "",
       this.confirmation ? `${this.confirmation.row.key}:${this.confirmation.confirm}` : "",
       this.error ?? "",
+      this.busy ?? "",
       this.windowStart,
       // Every working row shares one clock, so one glyph covers all of them.
       // Reading the clock here, rather than the row set, is what lets the cache
@@ -666,6 +661,7 @@ export class SessionsPanel {
     const at = Date.now();
     this.frameRows = null;
     this.innerWidth = Math.max(1, width - 4);
+    this.pageSize = Math.max(1, this.bodyBudget(height, this.innerWidth).budget - 1);
     // Everything the key depends on is settled first. windowStart used to be
     // written inside renderFrame, after the key was taken, so the stored key
     // described the previous scroll position and every scroll cost a second,
@@ -749,14 +745,9 @@ export class SessionsPanel {
         `${confirm ? theme.fg("accent", "❯") : " "} Delete`,
       ];
     } else if (this.rename) {
-      const { draft, cursor } = this.rename;
-      body = [
-        theme.bold(this.rename.row.name),
-        "",
-        `${theme.fg("accent", "❯")} ${cursorText(draft, cursor, Math.max(1, inner - 2))}`,
-      ];
+      body = this.rename.input.render(inner);
     } else {
-      if (this.searching) body.push(`${theme.fg("accent", "❯")} ${cursorText(this.query, this.queryCursor, Math.max(1, inner - 2))}`);
+      if (this.searching) body.push(this.searchInput.render(inner)[0]!);
       const nodes = this.nodes();
       const sample = nodes.filter((n) => n.kind === "row").slice(0, 200).map((n) => n.row!);
       const folderWidth = Math.min(
@@ -840,6 +831,7 @@ export class SessionsPanel {
   }
 
   dispose(): void {
+    this.disposed = true;
     if (this.gTimer) clearTimeout(this.gTimer);
     this.gTimer = null;
   }

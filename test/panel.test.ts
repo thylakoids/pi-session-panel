@@ -21,7 +21,7 @@ import { spinnerGlyphAt as currentGlyphForTest } from "../extension/panel.ts";
 import { readConfig } from "../extension/config.ts";
 import { dedupeLive, rowFromRecord, withoutLiveDuplicates } from "../extension/live.ts";
 import { mkdtempSync as mkdtemp2, writeFileSync as writeFile2 } from "node:fs";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, renderFakeCursor, visibleWidth } from "@earendil-works/pi-tui";
 
 const theme = {
   fg: (_c: string, s: string) => s,
@@ -173,6 +173,16 @@ test("delete choices stay visible when the panel is short", async () => {
   assert.match(lines.join("\n"), /Delete/);
 });
 
+test("deleting a row immediately selects its neighbour without waiting for render", async () => {
+  let rows = [row({ key: "closed:1", state: "closed" }), row({ key: "closed:2", state: "closed" })];
+  const { instance } = panel(() => rows, { remove: (removed: any) => { rows = rows.filter((entry) => entry.key !== removed.key); } });
+  instance.render(theme, 80, 12);
+  await instance.handleInput("X");
+  await instance.handleInput("\t");
+  await instance.handleInput("\r");
+  assert.equal(instance.selectedKey(), "closed:2");
+});
+
 test("Enter reopens a closed session instead of replacing this one", async () => {
   const rows = [
     row({ key: "live:1", state: "working", workingSince: Date.now() - 1000 }),
@@ -207,21 +217,21 @@ test("R rescans and / searches", async () => {
   assert.ok(instance.render(theme, 100, 20).some((l) => l.includes("❯ x")));
 });
 
-test("search shows its caret without moving text and Escape clears a kept filter", async () => {
+test("search shows its caret and keeps empty results editable", async () => {
   const { instance, calls } = panel(() => [row({ name: "ab" })]);
   await instance.handleInput("/");
   await instance.handleInput("a");
   await instance.handleInput("b");
   await instance.handleInput("\x1b[D");
-  assert.match(instance.render(theme, 60, 12).join("\n"), /❯ a\x1b\[7mb\x1b\[27m/, "search caret highlights b");
+  assert.ok(instance.render(theme, 60, 12).join("\n").includes(`❯ a${CURSOR_MARKER}${renderFakeCursor("b")}`), "search caret highlights b");
   await instance.handleInput("\x1b");
   assert.match(instance.render(theme, 60, 12).join("\n"), /Sessions/, "Escape leaves search");
   await instance.handleInput("/");
   await instance.handleInput("z");
   await instance.handleInput("\r");
-  assert.match(instance.render(theme, 60, 12).join("\n"), /filter: z/);
+  assert.equal(instance.isEditingText(), true, "Enter with no result keeps the search editable");
   await instance.handleInput("\x1b");
-  assert.doesNotMatch(instance.render(theme, 60, 12).join("\n"), /filter: z/);
+  assert.match(instance.render(theme, 60, 12).join("\n"), /Sessions/);
   assert.deepEqual(calls, [], "Escape clears the filter without closing the panel");
 });
 
@@ -462,6 +472,63 @@ test("search enter reopens a closed result and ignores an empty result set", asy
   assert.deepEqual(empty.calls, []);
 });
 
+test("changing search starts at the first result and clearing keeps that session selected", async () => {
+  const rows = Array.from({ length: 12 }, (_, index) => row({ key: `live:${index}`, name: `session ${index}` }));
+  const { instance } = panel(() => rows);
+  await instance.handleInput("G");
+  await instance.handleInput("/");
+  await instance.handleInput("session");
+  assert.equal(instance.selectedKey(), "live:0", "the old list index must not choose a search result");
+  await instance.handleInput("\x1b[B");
+  await instance.handleInput("\x1b");
+  assert.equal(instance.selectedKey(), "live:1", "clearing search keeps the selected session");
+});
+
+test("page keys navigate a screen at a time and Home/End reach the edges", async () => {
+  const rows = Array.from({ length: 30 }, (_, index) => row({ key: `live:${index}`, name: `session ${index}` }));
+  const { instance } = panel(() => rows);
+  instance.render(theme, 80, 12);
+  await instance.handleInput("\x1b[6~");
+  const index = rows.findIndex((entry) => entry.key === instance.selectedKey());
+  assert.ok(index > 1 && index < 10, "Page Down moves by the visible list height");
+  assert.match(instance.render(theme, 80, 12).join("\n"), new RegExp(`❯ · session ${index} `));
+  await instance.handleInput("\x1b[5~");
+  assert.equal(instance.selectedKey(), "live:0");
+  await instance.handleInput("\x1b[F");
+  assert.equal(instance.selectedKey(), "live:29");
+  await instance.handleInput("\x1b[H");
+  assert.equal(instance.selectedKey(), "live:0");
+});
+
+test("opening a search result cannot be submitted twice while pending", async () => {
+  let finish!: () => void;
+  let opened = 0;
+  const { instance, calls } = panel(() => [row()], { focus: () => {
+    opened++;
+    return new Promise<void>((resolve) => { finish = resolve; });
+  } });
+  await instance.handleInput("/");
+  const pending = instance.handleInput("\r");
+  await instance.handleInput("\r");
+  assert.equal(opened, 1);
+  assert.match(instance.render(theme, 80, 12).join("\n"), /open…/);
+  finish();
+  await pending;
+  assert.deepEqual(calls, ["close"]);
+});
+
+test("a failed search action leaves the query editable", async () => {
+  const { instance, calls } = panel(() => [row()], { focus: () => { throw new Error("pane unavailable"); } });
+  await instance.handleInput("/");
+  await instance.handleInput("session");
+  await instance.handleInput("\r");
+  assert.equal(instance.isEditingText(), true);
+  assert.match(instance.errorText() ?? "", /pane unavailable/);
+  await instance.handleInput("z");
+  assert.match(instance.render(theme, 80, 12).join("\n"), /sessionz/);
+  assert.deepEqual(calls, []);
+});
+
 test("the left arrow does not close the panel while typing", () => {
   const rows = [row({ key: "live:1", name: "alpha" })];
   const { instance, calls } = panel(() => rows);
@@ -484,11 +551,51 @@ test("rename edits at the caret, not at the end", async () => {
   // The caret is drawn where it is, not at the end of the draft: the whole point
   // of moving it is that the next character lands in a visible place.
   const drawn = instance.render(theme, 80, 20).join("\n");
-  assert.match(drawn, /❯ a\x1b\[7mb\x1b\[27mc/, "the caret highlights b without shifting c");
+  assert.ok(drawn.includes(`❯ a${CURSOR_MARKER}${renderFakeCursor("b")}c`), "the caret highlights b without shifting c");
 
   instance.handleInput("X");
   await instance.handleInput("\r");
   assert.deepEqual(renamed, ["aXbc"], "the character lands where the caret is");
+});
+
+test("rename ignores unhandled terminal keys and pastes text without submitting it", async () => {
+  const renamed: string[] = [];
+  const { instance } = panel(() => [row({ name: "abc" })], { rename: (_row: any, next: string) => renamed.push(next) });
+  await instance.handleInput("r");
+  await instance.handleInput("\x1b[A");
+  await instance.handleInput("\x1b[B");
+  await instance.handleInput("\x1bOP");
+  await instance.handleInput("\x1b[200~X");
+  await instance.handleInput("\r");
+  await instance.handleInput("new\x1b[201~");
+  assert.deepEqual(renamed, [], "a newline inside a paste must not submit");
+  await instance.handleInput("\r");
+  assert.deepEqual(renamed, ["abcXnew"]);
+});
+
+test("Kitty keyboard events dispatch shortcuts and insert printable text", async () => {
+  const renamed: string[] = [];
+  const { instance } = panel(() => [row({ key: "live:1", name: "abc" }), row({ key: "live:2", name: "second" })], { rename: (_row: any, next: string) => renamed.push(next) });
+  await instance.handleInput("\x1b[106u"); // j
+  assert.equal(instance.selectedKey(), "live:2");
+  await instance.handleInput("\x1b[107u"); // k
+  assert.equal(instance.selectedKey(), "live:1");
+  await instance.handleInput("\x1b[114u"); // r
+  assert.equal(instance.isEditingText(), true);
+  await instance.handleInput("\x1b[88u"); // X
+  await instance.handleInput("\r");
+  assert.deepEqual(renamed, ["abcX"]);
+});
+
+test("short rename panels show save errors next to the editable draft", async () => {
+  const { instance } = panel(() => [row()], { rename: () => { throw new Error("write failed"); } });
+  await instance.handleInput("r");
+  await instance.handleInput("X");
+  await instance.handleInput("\r");
+  const lines = instance.render(theme, 40, 8);
+  assertWidths(lines, 40);
+  assert.match(lines.join("\n"), /write failed/);
+  assert.match(lines.join("\n"), /session oneX/);
 });
 
 test("backspace removes a whole code point, not half a surrogate pair", async () => {
