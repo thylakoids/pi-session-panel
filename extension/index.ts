@@ -18,6 +18,7 @@ import { createNamer } from "./naming.ts";
 import { dedupeLive, ownPane, rowFromRecord, withoutLiveDuplicates } from "./live.ts";
 import { readRegistry, registryDir, removeRecord, writeRecord, type RegistryRecord } from "./registry.ts";
 import type { SessionRow } from "./types.ts";
+import { focusTmuxPane } from "./tmux-focus.ts";
 
 /** Run one tmux command, surfacing its stderr as the error message. */
 function runTmux(args: string[]): string {
@@ -264,8 +265,7 @@ export default function (pi: ExtensionAPI) {
   // ── actions ─────────────────────────────────────────────────────────────────
   const focusPane = (row: SessionRow, context: ExtensionContext) => {
     if (!row.pane) throw new Error("This session is not in tmux.");
-    runTmux(["select-window", "-t", row.pane]);
-    runTmux(["select-pane", "-t", row.pane]);
+    focusTmuxPane(row.pane, runTmux);
   };
 
 /** The fixed tmux session that holds reopened sessions. */

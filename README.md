@@ -59,7 +59,7 @@ pi install ~/Agent/pi-session-panel
 | `j` / `k`、`↑` / `↓` | 上下移动。搜索中方向键选结果，`j` / `k` 是输入字符 |
 | `Home` / `End`、`gg` / `G` | 跳到第一行 / 最后一行；输入框中 `Home` / `End` 移动文字光标 |
 | `Page Up` / `Page Down` | 列表和搜索结果按可见高度翻页 |
-| `Enter` / `→`（列表中） | Working、Idle：跳到那个 tmux pane；Closed：恢复到 tmux session `pi-sessions` 的新窗口 |
+| `Enter` / `→`（列表中） | Working、Idle：切换客户端到目标 pane（支持跨 tmux session）；Closed：恢复到 tmux session `pi-sessions` 的新窗口 |
 | `x` | 见上表；Closed 的删除仍需确认 |
 | `r` | 改名。`←` `→` `Home` `End` 移动光标，`Enter` 保存，`Esc` 取消 |
 | `/` | 搜索（与 `pi -r` 同一套：模糊词、`"短语"`、`re:正则`）。`↑` `↓` 选结果，`Enter` 直接打开，`Esc` 清空；无结果或打开失败时保持可编辑 |
