@@ -38,6 +38,8 @@ pi install ~/Agent/pi-session-panel
 
 起名规则：会话没有名字、且已经有 user 消息时，生成一个短标题写进 `session_info`。有名字就不再改。
 
+手动重新生成：在面板里选中会话，按 `r` 进入 Rename，再按 `Ctrl+G` 调用同一个 `titleModel`、命名提示词和模型接口。它读取选中会话当前分支的全部 user prompt（不含助手和工具输出），拼接后若超过 16,000 字符，截掉最旧的部分、保留最新内容。生成结果只填入编辑框，可以继续修改，按 Enter 才保存；生成期间按 Esc 取消。未配置模型或调用失败时显示错误，不覆盖原名和手动草稿。
+
 送给模型的 context 与 Claude Code 2.1.304 的会话起名一致：分支上每一条真人 user 消息，1000 字符取尾部，单条过长时中间挖掉并标注，包在 `<session>` 标签里，语言指令写在 user turn。细节见 [ADR 0008](./docs/adr/0008-title-context-follows-claude-code.md)。
 
 ## 三个分区
@@ -64,6 +66,7 @@ pi install ~/Agent/pi-session-panel
 | `Enter` / `→`（列表中） | Working、Idle：切换客户端到目标 pane（支持跨 tmux session）；Closed：恢复到 tmux session `pi-sessions` 的新窗口 |
 | `x` | 见上表；Closed 的删除仍需确认 |
 | `r` | 改名。`←` `→` `Home` `End` 移动光标，`Enter` 保存，`Esc` 取消 |
+| `Ctrl+G`（Rename 中） | 用自动命名配置的模型生成新草稿；再次按 Enter 才保存 |
 | `/` | 搜索（与 `pi -r` 同一套：模糊词、`"短语"`、`re:正则`）。`↑` `↓` 选结果，`Enter` 直接打开，`Esc` 清空；无结果或打开失败时保持可编辑 |
 | `?` | 显示当前可用操作；内容过长时 `↑` / `↓`、`j` / `k` 滚动，其他键关闭 |
 | `R` | 重新扫描 closed 分区 |
@@ -101,6 +104,14 @@ npm test
 ```
 
 运行测试覆盖列表、搜索、改名、删除确认和会话动作。
+
+真实模型检查（会产生一次命名调用，默认测试跳过）：
+
+```bash
+PI_PANEL_NAMING_LIVE=1 node --test test/rename-live.test.ts
+```
+
+使用官方 Pi 和已配置的 `titleModel`；可用 `PI_TEST_PI` 指定 Pi 路径，`PI_TEST_TITLE_MODEL=provider/model` 显式指定测试模型。测试只创建临时 Pi 会话，验证真实返回值先进入 Rename 草稿、Enter 后才写入，保留临时目录中的结果供检查。
 
 ## 文档
 

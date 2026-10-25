@@ -14,7 +14,7 @@ import { SessionsPanel } from "./panel.ts";
 import { closedScanDir, insertClosed, scanClosed, type ClosedIndex } from "./closed.ts";
 import { readClosedCache, writeClosedCache, type CachedClosedRow } from "./closed-cache.ts";
 import { configPath, readConfig, writeConfigExample } from "./config.ts";
-import { createNamer } from "./naming.ts";
+import { createNamer, generateSessionTitle } from "./naming.ts";
 import { dedupeLive, ownPane, rowFromRecord, withoutLiveDuplicates } from "./live.ts";
 import { readRegistry, registryDir, removeRecord, writeRecord, type RegistryRecord } from "./registry.ts";
 import type { SessionRow } from "./types.ts";
@@ -98,6 +98,10 @@ export default function (pi: ExtensionAPI) {
       self.sessionFile = file;
       changed = true;
     }
+    // Another panel updates our registry record after renaming the file.
+    // Adopt it before publishing the in-memory name over that change.
+    const externalName = file ? readRegistry(registry).live.find(record => record.pid === self.pid && record.sessionFile === file)?.name : undefined;
+    if (externalName && externalName !== self.name) pi.setSessionName(externalName);
     const name = ctx?.sessionManager.getSessionName();
     if (name !== self.name) {
       self.name = name;
@@ -218,6 +222,7 @@ export default function (pi: ExtensionAPI) {
               exit: (row) => exit(row),
               remove: (row) => removeSession(row),
               rename: (row, next) => rename(row, next),
+              generateName: (row, signal) => generateSessionTitle(context, row.sessionFile, readConfig(agentDir).titleModel, signal),
               rescan: () => rescan(context),
             },
           });
@@ -347,8 +352,8 @@ const RESTORE_SESSION = "pi-sessions";
 
   const rename = async (row: SessionRow, next: string) => {
     if (!row.sessionFile) throw new Error("This session has no file to name.");
-    const manager = SessionManager.open(row.sessionFile);
-    manager.appendSessionInfo(next);
+    if (row.sessionFile === self.sessionFile) pi.setSessionName(next);
+    else SessionManager.open(row.sessionFile).appendSessionInfo(next);
     if (closedIndex) {
       closedIndex = { ...closedIndex, rows: closedIndex.rows.map((r) => (r.key === row.key ? { ...r, name: next } : r)) };
     }
@@ -399,6 +404,7 @@ const RESTORE_SESSION = "pi-sessions";
   pi.on("before_agent_start", (event, context) => {
     // The prompt that triggered this run is not on the branch yet, so pass it in.
     if (event.messageType !== "user") return;
+    syncSession();
     void maybeName(context, event.prompt);
   });
 

@@ -24,6 +24,8 @@ function truncateToWidth(text: string, width: number, ellipsis = "", keepTail = 
 }
 
 export interface PanelActions {
+  /** Generate an editable rename draft; never save it automatically. */
+  generateName?(row: SessionRow, signal: AbortSignal): Promise<string>;
   /** Jump to the tmux pane. Only meaningful for live rows that live in tmux. */
   focus(row: SessionRow): void | Promise<void>;
   /** Interrupt the running turn: Escape in that session's input box. */
@@ -218,7 +220,7 @@ export class SessionsPanel {
   private searching = false;
   private confirmation: Confirmation | null = null;
   /** The rename draft and its caret, which the arrows move like any text field. */
-  private rename: { row: SessionRow; input: Input } | null = null;
+  private rename: { row: SessionRow; input: Input; generation?: AbortController } | null = null;
   /** The key list, toggled with ?. */
   private help = false;
   /** First visible row of the key list, for panels too short to show it all. */
@@ -410,7 +412,8 @@ export class SessionsPanel {
     };
     if (this.rename) return [
       command(["return"], "save", () => this.saveRename()),
-      command(["escape"], "cancel", () => { this.rename = null; this.error = null; }),
+      ...(this.options.actions.generateName ? [command(["ctrl+g"], "generate", () => { void this.generateRename(); })] : []),
+      command(["escape"], "cancel", () => { this.rename?.generation?.abort(); this.rename = null; this.error = null; }),
       command(["left", "right"], "caret", (data) => this.editInput(data)),
       command(["home", "end"], "first / last character", (data) => this.editInput(data), false),
     ];
@@ -479,6 +482,7 @@ export class SessionsPanel {
   }
 
   private hint(theme: any, width: number): string {
+    if (this.rename?.generation) return truncateToWidth(theme.fg("muted", "Generating name… · ") + this.keyHint(theme, "esc", "cancel"), width);
     if (this.busy) return truncateToWidth(theme.fg("muted", `${this.busy}…`), width);
     const parts: [string, string][] = [];
     const commands = this.commands().filter((command) => command.footer)
@@ -551,6 +555,28 @@ export class SessionsPanel {
     }
   }
 
+  private async generateRename(): Promise<void> {
+    // Unlike saving, generation must not set busy: Esc needs to stay usable.
+    const edit = this.rename;
+    if (!edit || edit.generation || !this.options.actions.generateName) return;
+    const controller = new AbortController();
+    edit.generation = controller;
+    this.error = null;
+    this.revision++;
+    try {
+      const title = await this.options.actions.generateName(edit.row, controller.signal);
+      if (this.disposed || this.rename !== edit || controller.signal.aborted) return;
+      edit.input = createInput(title);
+    } catch (error) {
+      if (!controller.signal.aborted && this.rename === edit && !this.disposed) {
+        this.error = error instanceof Error ? error.message : String(error);
+      }
+    } finally {
+      delete edit.generation;
+      this.revision++;
+    }
+  }
+
   private editInput(data: string): void {
     const input = this.rename?.input ?? this.searchInput;
     const before = input.getValue();
@@ -569,6 +595,7 @@ export class SessionsPanel {
 
   async handleInput(data: string): Promise<void> {
     if (this.busy || this.disposed) return;
+    if (this.rename?.generation && !matchesKey(data, "escape")) return;
     this.frameRows = null;
     if ((this.rename || this.searching) && (this.pasting || data.includes("\x1b[200~"))) {
       this.pasting = !data.includes("\x1b[201~");
@@ -907,6 +934,7 @@ export class SessionsPanel {
   }
 
   dispose(): void {
+    this.rename?.generation?.abort();
     this.disposed = true;
     if (this.gTimer) clearTimeout(this.gTimer);
     this.gTimer = null;

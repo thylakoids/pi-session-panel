@@ -10,6 +10,7 @@
  * in exactly the same kind of list. See docs/adr/0008 for what was copied and why.
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 /**
  * The title rules. Long on purpose: every sentence here closes a failure mode that
@@ -85,6 +86,7 @@ const LANGUAGE_RULE =
 const MAX_INPUT = 2000;
 const HEAD = 1500;
 const CONTENT_LIMIT = 1000;
+export const RENAME_CONTENT_LIMIT = 16_000;
 const MIN_UNITS = 3;
 
 /**
@@ -134,7 +136,7 @@ function textOf(content: unknown): string {
 /**
  * What the model gets to name, following Claude Code "UPn": every human turn on the
  * branch joined by newlines, plus the prompt that has not landed on the branch yet,
- * keeping the last CONTENT_LIMIT characters.
+ * keeping the last `limit` characters (CONTENT_LIMIT for automatic naming).
  *
  * Every human turn, not just the first: a session that opens with "看下这个" and then
  * pastes the error only makes sense with the paste included. Assistant text is left
@@ -144,6 +146,7 @@ function textOf(content: unknown): string {
 export function sessionContent(
   entries: readonly { type: string; message?: { role: string; content: unknown } }[],
   pending?: string,
+  limit = CONTENT_LIMIT,
 ): string {
   const parts: string[] = [];
   for (const entry of entries) {
@@ -152,7 +155,7 @@ export function sessionContent(
   }
   if (pending?.trim()) parts.push(pending);
   const joined = parts.join("\n");
-  return joined.length > CONTENT_LIMIT ? joined.slice(-CONTENT_LIMIT) : joined;
+  return joined.length > limit ? joined.slice(-limit) : joined;
 }
 
 /**
@@ -282,6 +285,38 @@ export function resolveModel(
   return model ? { model } : { error: 'no model "' + want + '"' };
 }
 
+/** Same provider call and title rules for automatic naming and explicit rename. */
+async function completeTitle(
+  context: ExtensionContext,
+  model: NonNullable<ReturnType<ExtensionContext["modelRegistry"]["find"]>>,
+  source: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  signal?.throwIfAborted();
+  const reply = await context.modelRegistry.complete(model, {
+    systemPrompt: SYSTEM_PROMPT,
+    messages: [{ role: "user", content: buildUserPrompt(source), timestamp: Date.now() }],
+  }, signal ? { signal } : undefined);
+  signal?.throwIfAborted();
+  if (reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error(reply.errorMessage || "Name generation failed.");
+  const title = cleanTitle(reply.content.map(part => part.type === "text" ? part.text : "").join(" "));
+  if (!title) throw new Error("The naming model returned no title.");
+  return title;
+}
+
+/** Generate a draft for any selected session; only the rename action writes it. */
+export async function generateSessionTitle(
+  context: ExtensionContext, sessionFile: string | undefined, spec: string | undefined, signal?: AbortSignal,
+): Promise<string> {
+  if (!sessionFile) throw new Error("This session has no file to name.");
+  if (!spec) throw new Error("Configure titleModel in session-panel/config.json to generate a name.");
+  const resolved = resolveModel(context.modelRegistry, spec);
+  if ("error" in resolved) throw new Error(resolved.error);
+  const source = sessionContent(SessionManager.open(sessionFile).getBranch(), undefined, RENAME_CONTENT_LIMIT).trim();
+  if (!source) throw new Error("This session has no user prompts to name.");
+  return completeTitle(context, resolved.model, source, signal);
+}
+
 /**
  * Returns `maybeName`. It is safe to call from any hook, as often as you like:
  * it returns immediately when there is nothing to do, and it never throws.
@@ -319,14 +354,7 @@ export function createNamer(options: NamerOptions) {
 
     generating = true;
     try {
-      const reply = await context.modelRegistry.complete(model, {
-        systemPrompt: SYSTEM_PROMPT,
-        messages: [{ role: "user", content: buildUserPrompt(capInput(source)), timestamp: Date.now() }],
-      });
-      const title = cleanTitle(
-        reply.content.map((part) => (part.type === "text" ? part.text : "")).join(" "),
-      );
-      if (!title) return;
+      const title = await completeTitle(context, model, capInput(source));
       // Re-read the name before writing. The user may have renamed the session
       // while the model was thinking, and overwriting a typed name is the one
       // mistake here that cannot be undone.
