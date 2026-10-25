@@ -156,6 +156,17 @@ function padStartVisible(text: string, width: number): string {
   return " ".repeat(Math.max(0, width - visibleWidth(text))) + text;
 }
 
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const graphemes = (value: string): string[] => [...graphemeSegmenter.segment(value)].map(({ segment }) => segment);
+
+function cursorText(value: string, cursor: number, width: number): string {
+  const atEnd = cursor === value.length;
+  const underCaret = atEnd ? " " : graphemes(value.slice(cursor))[0]!;
+  const head = truncateToWidth(value.slice(0, cursor), Math.max(1, width - visibleWidth(underCaret)), "…", true);
+  const tail = truncateToWidth(value.slice(cursor + (atEnd ? 0 : underCaret.length)), Math.max(0, width - visibleWidth(head) - visibleWidth(underCaret)), "…");
+  return `${head}\x1b[7m${underCaret}\x1b[27m${tail}`;
+}
+
 interface Confirmation {
   row: SessionRow;
   confirm: boolean;
@@ -319,10 +330,10 @@ export class SessionsPanel {
    * the rename box had no caret at all, and the search box had no arrow handling.
    */
   private editText(value: string, cursor: number, data: string): { value: string; cursor: number } | undefined {
-    // The caret moves over code points, never UTF-16 units: one backspace on an
-    // emoji must remove the emoji, not half of its surrogate pair.
-    const chars = [...value];
-    const before = [...value.slice(0, cursor)].length;
+    // Move over complete visible characters, including emoji sequences and
+    // combining accents, rather than splitting their code points.
+    const chars = graphemes(value);
+    const before = graphemes(value.slice(0, cursor)).length;
     const splice = (from: number, remove: number, insert = ""): { value: string; cursor: number } => {
       const out = [...chars.slice(0, from), ...(insert ? [insert] : []), ...chars.slice(from + remove)];
       const next = out.join("");
@@ -392,19 +403,15 @@ export class SessionsPanel {
       return this.hints(theme, [["enter", "save"], ["esc", "cancel"], ["←/→", "caret"]]);
     }
     if (this.confirmation) {
-      return this.hints(theme, [["j/k", "choose"], ["enter", "confirm"], ["esc", "cancel"]]);
+      return this.hints(theme, [["↑/↓", "choose"], ["tab", "switch"], ["enter", "confirm"], ["esc", "cancel"]]);
     }
     if (this.searching) {
       return this.hints(theme, [["↑/↓", "pick"], ["enter", "open"], ["esc", "clear"]]);
     }
-    const parts: [string, string][] = [
-      ["j/k", "move"],
-      ["enter", "open"],
-      ["r", "rename"],
-      ["X", "stop"],
-      ["/", "search"],
-      ["?", "keys"],
-    ];
+    const state = this.selectedRow()?.state;
+    const parts: [string, string][] = [];
+    if (state) parts.push(["j/k", "move"], ["enter", "open"], ["r", "rename"], ["X", state === "working" ? "interrupt" : state === "idle" ? "exit" : "delete"]);
+    parts.push(["/", "search"], ["?", "keys"]);
     if (this.query) parts.push(["esc", "clear filter"]);
     return this.hints(theme, parts);
   }
@@ -473,6 +480,7 @@ export class SessionsPanel {
     if (this.rename) {
       if (matchesKey(data, "escape")) {
         this.rename = null;
+        this.error = null;
         return;
       }
       if (data === "\r" || data === "\n" || matchesKey(data, "return")) {
@@ -484,10 +492,15 @@ export class SessionsPanel {
           this.error = "A session needs a name.";
           return;
         }
-        this.rename = null;
-        if (next === row.name) return;
+        if (next === row.name) {
+          this.rename = null;
+          this.error = null;
+          return;
+        }
         try {
           await this.options.actions.rename(row, next);
+          this.rename = null;
+          this.error = null;
           // The name is in the row set now, but the data fingerprint samples only
           // numbers. This makes the change visible on the very next frame.
           this.revision++;
@@ -498,6 +511,7 @@ export class SessionsPanel {
       }
       const edited = this.editText(this.rename.draft, this.rename.cursor, data);
       if (edited) {
+        if (edited.value !== this.rename.draft) this.error = null;
         this.rename.draft = edited.value;
         this.rename.cursor = edited.cursor;
       }
@@ -505,12 +519,14 @@ export class SessionsPanel {
     }
 
     if (this.confirmation) {
-      if (matchesKey(data, "escape") || matchesKey(data, "left")) {
+      if (matchesKey(data, "escape")) {
         this.confirmation = null;
-      } else if (data === "j" || matchesKey(data, "down") || data === "\t" || matchesKey(data, "right")) {
+      } else if (data === "j" || matchesKey(data, "down") || matchesKey(data, "right")) {
         this.confirmation.confirm = true;
-      } else if (data === "k" || matchesKey(data, "up")) {
+      } else if (data === "k" || matchesKey(data, "up") || matchesKey(data, "left")) {
         this.confirmation.confirm = false;
+      } else if (data === "\t") {
+        this.confirmation.confirm = !this.confirmation.confirm;
       } else if (data === "\r" || data === "\n" || matchesKey(data, "return")) {
         await this.confirm(this.confirmation.confirm);
       }
@@ -565,6 +581,13 @@ export class SessionsPanel {
     this.clampSelection();
     const row = this.selectedRow();
 
+    if (matchesKey(data, "escape") && this.query) {
+      this.query = "";
+      this.queryCursor = 0;
+      this.selected = null;
+      this.clampSelection();
+      return;
+    }
     if (data === "q" || matchesKey(data, "escape")) {
       this.options.close();
       return;
@@ -762,7 +785,7 @@ export class SessionsPanel {
    */
   private bodyBudget(height: number, inner: number): { budget: number; errorLines: string[] } {
     const errorLines = this.error ? wrapTextWithAnsi(this.error, inner).slice(0, 2) : [];
-    return { budget: Math.max(1, height - 5 - errorLines.length), errorLines };
+    return { budget: Math.max(1, height - 5 - errorLines.length - (this.searching ? 1 : 0)), errorLines };
   }
 
   /**
@@ -796,10 +819,12 @@ export class SessionsPanel {
     // list whose rows appear to be missing.
     const title = this.help
       ? "Keys"
+      : this.confirmation
+        ? "Delete session"
       : this.rename
         ? "Rename session"
         : this.searching
-          ? `Search: ${this.query}`
+          ? "Search"
           : this.query
             ? `Sessions — filter: ${this.query}`
             : "Sessions";
@@ -813,31 +838,22 @@ export class SessionsPanel {
       body = this.helpBody(theme, inner, Math.max(1, height - 5));
     } else if (this.confirmation) {
       const { row, confirm } = this.confirmation;
+      const question = wrapTextWithAnsi(`${row.name}\nDelete this session file from disk?\n${row.sessionFile ?? row.cwd}\nThis cannot be undone.`, inner);
       body = [
-        theme.bold(row.name),
-        "",
-        ...wrapTextWithAnsi(
-          `Delete this session file from disk?\n\n${row.sessionFile ?? row.cwd}\n\nThis cannot be undone.`,
-          inner,
-        ),
+        ...question.slice(0, Math.max(0, budget - 3)),
         "",
         `${!confirm ? theme.fg("accent", "❯") : " "} Cancel`,
         `${confirm ? theme.fg("accent", "❯") : " "} Delete`,
       ];
     } else if (this.rename) {
-      // Highlight the character under the caret instead of inserting a glyph
-      // that pushes every following character one column to the right.
       const { draft, cursor } = this.rename;
-      const atEnd = cursor === draft.length;
-      const underCaret = atEnd ? " " : [...draft.slice(cursor)][0]!;
-      const head = truncateToWidth(draft.slice(0, cursor), Math.max(1, inner - 2 - visibleWidth(underCaret)), "…", true);
-      const tail = truncateToWidth(draft.slice(cursor + (atEnd ? 0 : underCaret.length)), Math.max(0, inner - 2 - visibleWidth(head) - visibleWidth(underCaret)), "…");
       body = [
         theme.bold(this.rename.row.name),
         "",
-        `${theme.fg("accent", "❯")} ${head}\x1b[7m${underCaret}\x1b[27m${tail}`,
+        `${theme.fg("accent", "❯")} ${cursorText(draft, cursor, Math.max(1, inner - 2))}`,
       ];
     } else {
+      if (this.searching) body.push(`${theme.fg("accent", "❯")} ${cursorText(this.query, this.queryCursor, Math.max(1, inner - 2))}`);
       const nodes = this.nodes();
       const sample = nodes.filter((n) => n.kind === "row").slice(0, 200).map((n) => n.row!);
       const folderWidth = Math.min(
@@ -875,7 +891,7 @@ export class SessionsPanel {
             theme.fg("dim", right),
         );
       }
-      if (total === 0) body = [theme.fg("dim", this.emptyMessage())];
+      if (total === 0) body.push(theme.fg("dim", this.emptyMessage()));
     }
 
     body.push(...errorLines.map((s) => theme.fg("error", s)));

@@ -93,6 +93,21 @@ test("every line is exactly the requested width", () => {
   }
 });
 
+test("search and rename keep their input and frame within narrow widths", async () => {
+  const { instance } = panel(() => [row({ name: "为什么回测的滑点模型偏高" })]);
+  await instance.handleInput("/");
+  await instance.handleInput("滑");
+  for (const width of [24, 32, 40]) {
+    const lines = instance.render(theme, width, 12);
+    assertWidths(lines, width);
+    assert.ok(lines.some((line) => line.includes("❯")), "search input remains visible");
+  }
+  await instance.handleInput("\x1b");
+  await instance.handleInput("r");
+  await instance.handleInput("\x1b[D");
+  for (const width of [24, 32, 40]) assertWidths(instance.render(theme, width, 12), width);
+});
+
 test("a CJK session name does not shift the right-hand columns", () => {
   const rows = [
     row({ key: "live:1", name: "为什么回测的滑点模型偏高", cwd: "/Users/x/FutTrader" }),
@@ -136,6 +151,28 @@ test("X interrupts a working row, exits an idle row, and confirms for a closed r
   assert.deepEqual(calls, ["interrupt", "exit", "remove"], "confirming must delete");
 });
 
+test("delete confirmation arrows choose and Tab toggles", async () => {
+  const { instance, calls } = panel(() => [row({ state: "closed" })]);
+  await instance.handleInput("X");
+  await instance.handleInput("\x1b[C");
+  await instance.handleInput("\x1b[D");
+  await instance.handleInput("\r");
+  assert.deepEqual(calls, [], "left selects Cancel instead of dismissing or deleting");
+  await instance.handleInput("X");
+  await instance.handleInput("\t");
+  await instance.handleInput("\r");
+  assert.deepEqual(calls, ["remove"], "Tab moves to Delete");
+});
+
+test("delete choices stay visible when the panel is short", async () => {
+  const { instance } = panel(() => [row({ state: "closed", sessionFile: "/" + "very-long-directory/".repeat(20) + "session.jsonl" })]);
+  await instance.handleInput("X");
+  const lines = instance.render(theme, 40, 9);
+  assertWidths(lines, 40);
+  assert.match(lines.join("\n"), /Cancel/);
+  assert.match(lines.join("\n"), /Delete/);
+});
+
 test("Enter reopens a closed session instead of replacing this one", async () => {
   const rows = [
     row({ key: "live:1", state: "working", workingSince: Date.now() - 1000 }),
@@ -167,7 +204,25 @@ test("R rescans and / searches", async () => {
   await instance.handleInput("x");
   instance.render(theme, 100, 20);
   // The search box must show the query.
-  assert.ok(instance.render(theme, 100, 20).some((l) => l.includes("Search: x")));
+  assert.ok(instance.render(theme, 100, 20).some((l) => l.includes("❯ x")));
+});
+
+test("search shows its caret without moving text and Escape clears a kept filter", async () => {
+  const { instance, calls } = panel(() => [row({ name: "ab" })]);
+  await instance.handleInput("/");
+  await instance.handleInput("a");
+  await instance.handleInput("b");
+  await instance.handleInput("\x1b[D");
+  assert.match(instance.render(theme, 60, 12).join("\n"), /❯ a\x1b\[7mb\x1b\[27m/, "search caret highlights b");
+  await instance.handleInput("\x1b");
+  assert.match(instance.render(theme, 60, 12).join("\n"), /Sessions/, "Escape leaves search");
+  await instance.handleInput("/");
+  await instance.handleInput("z");
+  await instance.handleInput("\r");
+  assert.match(instance.render(theme, 60, 12).join("\n"), /filter: z/);
+  await instance.handleInput("\x1b");
+  assert.doesNotMatch(instance.render(theme, 60, 12).join("\n"), /filter: z/);
+  assert.deepEqual(calls, [], "Escape clears the filter without closing the panel");
 });
 
 test("search matches the way pi -r does: fuzzy tokens, quoted phrases, re:", () => {
@@ -446,6 +501,16 @@ test("backspace removes a whole code point, not half a surrogate pair", async ()
   assert.deepEqual(renamed, ["ab"], "the emoji is removed whole");
 });
 
+test("caret and backspace treat a joined emoji as one character", async () => {
+  const renamed: string[] = [];
+  const { instance } = panel(() => [row({ name: "a👩‍💻b" })], { rename: (_row: any, next: string) => renamed.push(next) });
+  await instance.handleInput("r");
+  await instance.handleInput("\x1b[D");
+  await instance.handleInput("\x7f");
+  await instance.handleInput("\r");
+  assert.deepEqual(renamed, ["ab"]);
+});
+
 test("an empty rename is refused instead of silently doing nothing", () => {
   const rows = [row({ key: "live:1", name: "abc" })];
   const renamed: string[] = [];
@@ -456,6 +521,15 @@ test("an empty rename is refused instead of silently doing nothing", () => {
     assert.deepEqual(renamed, [], "nothing is written");
     assert.match(instance.errorText(), /needs a name/, "and the user is told why");
   });
+});
+
+test("a failed rename stays editable", async () => {
+  const { instance } = panel(() => [row({ name: "abc" })], { rename: () => { throw new Error("write failed"); } });
+  await instance.handleInput("r");
+  await instance.handleInput("X");
+  await instance.handleInput("\r");
+  assert.equal(instance.isEditingText(), true);
+  assert.match(instance.errorText() ?? "", /write failed/);
 });
 
 test("the ? help screen lists r rename and closes on the next key", () => {
