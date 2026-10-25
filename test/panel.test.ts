@@ -429,7 +429,7 @@ test("rename edits at the caret, not at the end", async () => {
   // The caret is drawn where it is, not at the end of the draft: the whole point
   // of moving it is that the next character lands in a visible place.
   const drawn = instance.render(theme, 80, 20).join("\n");
-  assert.match(drawn, /\u276f a\u258Cbc/, "the caret sits between a and b");
+  assert.match(drawn, /❯ a\x1b\[7mb\x1b\[27mc/, "the caret highlights b without shifting c");
 
   instance.handleInput("X");
   await instance.handleInput("\r");

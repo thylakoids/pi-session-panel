@@ -825,16 +825,17 @@ export class SessionsPanel {
         `${confirm ? theme.fg("accent", "❯") : " "} Delete`,
       ];
     } else if (this.rename) {
-      // The caret is drawn where it actually is. It used to be glued to the end of
-      // the draft, so moving left with the arrow keys changed nothing on screen
-      // and the next character appeared in the middle of a line that looked whole.
+      // Highlight the character under the caret instead of inserting a glyph
+      // that pushes every following character one column to the right.
       const { draft, cursor } = this.rename;
-      const head = truncateToWidth(draft.slice(0, cursor), Math.max(1, inner - 3), "…", true);
-      const tail = truncateToWidth(draft.slice(cursor), Math.max(1, inner - 3 - visibleWidth(head)), "…");
+      const atEnd = cursor === draft.length;
+      const underCaret = atEnd ? " " : [...draft.slice(cursor)][0]!;
+      const head = truncateToWidth(draft.slice(0, cursor), Math.max(1, inner - 2 - visibleWidth(underCaret)), "…", true);
+      const tail = truncateToWidth(draft.slice(cursor + (atEnd ? 0 : underCaret.length)), Math.max(0, inner - 2 - visibleWidth(head) - visibleWidth(underCaret)), "…");
       body = [
         theme.bold(this.rename.row.name),
         "",
-        `${theme.fg("accent", "❯")} ${head}${theme.fg("accent", "▌")}${tail}`,
+        `${theme.fg("accent", "❯")} ${head}\x1b[7m${underCaret}\x1b[27m${tail}`,
       ];
     } else {
       const nodes = this.nodes();
