@@ -436,11 +436,11 @@ test("the ? help screen lists r rename and closes on the next key", () => {
   const { instance } = panel(() => rows);
   instance.handleInput("?");
   const screen = instance.render(theme, 100, 24).join("\n");
-  assert.match(screen, /rename this session/, "the list mentions rename");
+  assert.match(screen, /r\s+rename/, "the list mentions rename");
   assert.match(screen, /Keys/, "the title says what this is");
   // The next key must be consumed by the help screen, not act on the list.
   instance.handleInput("X");
-  assert.ok(!instance.render(theme, 100, 24).join("\n").includes("rename this session"), "any key closes it");
+  assert.ok(!instance.render(theme, 100, 24).join("\n").includes("this list"), "any key closes it");
 });
 
 test("the hint row says what the keys do in the current mode", () => {
@@ -450,7 +450,8 @@ test("the hint row says what the keys do in the current mode", () => {
   assert.match(normal, /r rename/, "the list hint must mention rename");
   instance.handleInput("/");
   const searching = instance.render(theme, 120, 24).join("\n");
-  assert.match(searching, /pick a result/, "search has its own hint");
+  assert.match(searching, /up\/down/, "alternatives are joined with a slash, no spaces");
+  assert.match(searching, /pick/, "search has its own hint");
   assert.doesNotMatch(searching, /again to close/, "and does not advertise the close gesture");
 });
 

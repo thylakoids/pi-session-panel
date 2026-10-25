@@ -46,6 +46,9 @@ export interface PanelOptions {
   close(): void;
 }
 
+/** Gap between two help columns: wide enough that they read as separate. */
+const HELP_GAP = 4;
+
 type Section = "working" | "idle" | "closed";
 const SECTIONS: Section[] = ["working", "idle", "closed"];
 
@@ -169,6 +172,10 @@ export class SessionsPanel {
   private rename: { row: SessionRow; draft: string; cursor: number } | null = null;
   /** The key list, toggled with ?. */
   private help = false;
+  /** First visible row of the key list, for panels too short to show it all. */
+  private helpScroll = 0;
+  /** Whether the key list is taller than the panel, so the hint can say j/k scrolls. */
+  private helpOverflow = false;
   /**
    * Bumped by anything the panel itself changes about a row.
    *
@@ -331,19 +338,42 @@ export class SessionsPanel {
     return undefined;
   }
 
-  /** The key list. One place, so a new key cannot be added without being listed. */
+  /**
+   * The key list, and the footer's per-mode hint.
+   *
+   * Both follow pi's own footers (its keybinding-hints.js): the key token is dim,
+   * the action is muted, one space between them, and " · " between hints.
+   * Alternatives are joined with "/" and no spaces — "j/k", not "j / k" — because
+   * the slash separates alternatives inside one token, it is not punctuation
+   * around it.
+   *
+   * Arrow keys are spelled "up"/"down" rather than the glyphs. The glyphs are one
+   * narrow column wide and sit on a different baseline from Latin text, so a row of
+   * them reads as damage next to "enter" and "esc"; pi spells them out for the
+   * same reason.
+   */
   private static readonly KEY_LIST: [string, string][] = [
-    ["j / k  ↓ / ↑", "move the selection"],
-    ["gg / G", "first / last"],
-    ["enter", "working, idle: jump to its tmux pane; closed: reopen"],
-    ["X", "working: interrupt; idle: exit; closed: delete"],
-    ["r", "rename this session"],
-    ["/", "search: words, \"phrase\", re:regex"],
-    ["esc", "searching: clear the query; otherwise close the panel"],
-    ["R", "rescan the closed section"],
+    ["j/k", "move"],
+    ["up/down", "move too"],
+    ["gg/G", "first / last"],
+    ["enter", "open it"],
+    ["X", "interrupt, exit or delete"],
+    ["r", "rename"],
+    ["/", "search"],
+    ["R", "rescan closed"],
     ["?", "this list"],
-    ["q", "close the panel"],
+    ["q/esc", "close"],
   ];
+
+  /** One hint: dim key, muted action. */
+  private keyHint(theme: any, key: string, action: string): string {
+    return theme.fg("dim", key) + theme.fg("muted", " " + action);
+  }
+
+  /** Hints joined the way pi joins its own. */
+  private hints(theme: any, parts: [string, string][]): string {
+    return parts.map(([key, action]) => this.keyHint(theme, key, action)).join(theme.fg("muted", " · "));
+  }
 
   /**
    * The hint row, which must say what the keys do *in this mode*.
@@ -351,21 +381,73 @@ export class SessionsPanel {
    * A single static line was wrong twice over: it never mentioned r or X, and
    * inside search or rename the arrow keys do not close the panel at all.
    */
-  private hint(): string {
-    if (this.help) return "any key to close this list";
-    if (this.rename) return "enter saves  ·  esc cancels  ·  ← → move the caret";
-    if (this.confirmation) return "j / k choose  ·  enter confirm  ·  esc cancel";
-    if (this.searching) return "↑ ↓ pick a result  ·  enter keep  ·  esc clear";
-    const filtered = this.query ? "  ·  esc clears the filter" : "";
-    return `j / k move  ·  enter open  ·  X stop  ·  r rename  ·  / search  ·  ? keys${filtered}`;
+  private hint(theme: any): string {
+    if (this.help) {
+      return this.helpOverflow
+        ? this.hints(theme, [["j/k", "scroll"], ["any other key", "close"]])
+        : this.keyHint(theme, "any key", "close this list");
+    }
+    if (this.rename) {
+      return this.hints(theme, [["enter", "save"], ["esc", "cancel"], ["left/right", "caret"]]);
+    }
+    if (this.confirmation) {
+      return this.hints(theme, [["j/k", "choose"], ["enter", "confirm"], ["esc", "cancel"]]);
+    }
+    if (this.searching) {
+      return this.hints(theme, [["up/down", "pick"], ["enter", "keep"], ["esc", "clear"]]);
+    }
+    const parts: [string, string][] = [
+      ["j/k", "move"],
+      ["enter", "open"],
+      ["r", "rename"],
+      ["X", "stop"],
+      ["/", "search"],
+      ["?", "keys"],
+    ];
+    if (this.query) parts.push(["esc", "clear filter"]);
+    return this.hints(theme, parts);
   }
 
-  /** The body of the help screen. */
-  private helpBody(theme: any, inner: number): string[] {
-    const width = Math.max(8, ...SessionsPanel.KEY_LIST.map(([keys]) => visibleWidth(keys)));
-    return SessionsPanel.KEY_LIST.map(([keys, action]) =>
-      theme.fg("accent", padEndVisible(keys, width)) + "  " + theme.fg("text", action),
-    ).map((line) => truncateToWidth(line, inner));
+  /** The body of the help screen: one key column, one action column. */
+  /**
+   * The help screen: one key column, one action column, wrapped into as many
+   * columns as the panel can carry.
+   *
+   * The column count is what makes the list fit a short panel instead of being
+   * cut off, and `helpScroll` covers the case where even that is not enough: a
+   * panel eight rows tall cannot show ten entries side by side, so the list
+   * scrolls instead of lying about how many keys exist.
+   */
+  private helpBody(theme: any, inner: number, rows: number): string[] {
+    const keys = SessionsPanel.KEY_LIST;
+    const keyWidth = Math.max(...keys.map(([k]) => visibleWidth(k))) + 2;
+    const cell = (key: string, action: string) =>
+      theme.fg("dim", padEndVisible(key, keyWidth)) + theme.fg("muted", action);
+
+    // Each column is the key column plus its widest action, plus a gap wide
+    // enough that two adjacent cells do not read as one run-on line.
+    const widest = Math.max(...keys.map(([k, a]) => keyWidth + visibleWidth(a))) + HELP_GAP;
+    const byWidth = Math.max(1, Math.floor(inner / widest));
+    const byHeight = Math.ceil(keys.length / Math.max(1, rows));
+    const columns = Math.max(1, Math.min(byHeight, byWidth));
+    const perColumn = Math.ceil(keys.length / columns);
+
+    // Never scroll past the end: a short last page would look like a bug.
+    const maxScroll = Math.max(0, perColumn - rows);
+    this.helpScroll = Math.max(0, Math.min(this.helpScroll, maxScroll));
+    this.helpOverflow = maxScroll > 0;
+
+    const lines: string[] = [];
+    for (let row = this.helpScroll; row < perColumn; row++) {
+      const cells: string[] = [];
+      for (let col = 0; col < columns; col++) {
+        const entry = keys[col * perColumn + row];
+        if (entry) cells.push(cell(entry[0], entry[1]));
+      }
+      if (cells.length === 0) break;
+      lines.push(truncateToWidth(cells.join(theme.fg("muted", " ".repeat(HELP_GAP))), inner));
+    }
+    return lines;
   }
 
   async handleInput(data: string): Promise<void> {
@@ -373,7 +455,17 @@ export class SessionsPanel {
     // closes it: reading the list and then hunting for the same key again would
     // be an extra step for no reason.
     if (this.help) {
+      // j/k scroll the list when it does not fit; anything else closes it.
+      if (data === "j" || matchesKey(data, "down")) {
+        this.helpScroll++;
+        return;
+      }
+      if (data === "k" || matchesKey(data, "up")) {
+        this.helpScroll = Math.max(0, this.helpScroll - 1);
+        return;
+      }
       this.help = false;
+      this.helpScroll = 0;
       return;
     }
 
@@ -514,6 +606,7 @@ export class SessionsPanel {
     }
     if (data === "?") {
       this.help = true;
+      this.helpScroll = 0;
       return;
     }
     if (!row) return;
@@ -583,6 +676,7 @@ export class SessionsPanel {
       this.queryCursor,
       this.searching ? 1 : 0,
       this.help ? 1 : 0,
+      this.helpScroll,
       this.revision,
       this.rename ? `${this.rename.row.key}:${this.rename.draft}:${this.rename.cursor}` : "",
       this.confirmation ? `${this.confirmation.row.key}:${this.confirmation.confirm}` : "",
@@ -712,7 +806,7 @@ export class SessionsPanel {
 
     let body: string[] = [];
     if (this.help) {
-      body = this.helpBody(theme, inner);
+      body = this.helpBody(theme, inner, Math.max(1, height - 5));
     } else if (this.confirmation) {
       const { row, confirm } = this.confirmation;
       body = [
@@ -786,12 +880,12 @@ export class SessionsPanel {
     if (body.length > Math.max(1, height - 5)) body = body.slice(0, Math.max(1, height - 5));
     while (body.length < Math.max(1, height - 5)) body.push("");
 
-    const hint = truncateToWidth(this.hint(), inner);
+    const hint = truncateToWidth(this.hint(theme), inner);
     const framed = [
       top,
       border("│") + " ".repeat(Math.max(0, width - 2)) + border("│"),
       ...body.map((line) => border("│") + " " + padEndVisible(truncateToWidth(line, inner), inner) + " " + border("│")),
-      border("│") + " " + theme.fg("dim", hint) + " ".repeat(Math.max(0, inner - visibleWidth(hint))) + " " + border("│"),
+      border("│") + " " + hint + " ".repeat(Math.max(0, inner - visibleWidth(hint))) + " " + border("│"),
       bottom,
     ];
 
