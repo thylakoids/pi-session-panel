@@ -383,6 +383,7 @@ const RESTORE_SESSION = "pi-sessions";
   });
 
   pi.on("session_start", (event, context) => {
+    maybeName.cancel();
     ctx = context;
     syncSession();
     self.state = "idle";
@@ -397,6 +398,16 @@ const RESTORE_SESSION = "pi-sessions";
       isBlocked: () => panelOpen,
     });
     context.ui.setEditorComponent((tui, theme, keybindings) => new GestureEditor(tui, theme, keybindings) as any);
+  });
+
+  // Cancel before navigation starts, including its asynchronous summarization.
+  // If another extension cancels navigation, the next input can try naming again.
+  pi.on("session_before_switch", () => { maybeName.cancel(); });
+  pi.on("session_before_fork", () => { maybeName.cancel(); });
+  pi.on("session_before_tree", () => { maybeName.cancel(); });
+  pi.on("session_tree", (_event, context) => {
+    maybeName.cancel();
+    void maybeName(context);
   });
 
   pi.on("before_agent_start", (event, context) => {
@@ -421,6 +432,7 @@ const RESTORE_SESSION = "pi-sessions";
   });
 
   pi.on("session_shutdown", () => {
+    maybeName.cancel();
     removeRecord(registry, self.pid);
   });
 }

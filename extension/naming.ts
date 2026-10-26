@@ -9,6 +9,7 @@
  * What goes into the prompt follows Claude Code 2.1.304, whose session titles sit
  * in exactly the same kind of list. See docs/adr/0008 for what was copied and why.
  */
+import { stripVTControlCharacters } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
@@ -173,7 +174,7 @@ function stripFence(text: string): string {
 }
 
 /**
- * The \`title\` field, empty for invalid title JSON, or undefined for plain text.
+ * The \`title\` field, empty for invalid structured output, or undefined for plain text.
  *
  * Claude Code gets this for free: its \`json_schema\` output format makes the
  * provider produce exactly \`{"title": ...}\`. pi's \`complete()\` has no response
@@ -183,12 +184,13 @@ function stripFence(text: string): string {
 function titleFromJson(text: string): string | undefined {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) return undefined;
+  if (start < 0) return text.trimStart().startsWith("[") ? "" : undefined;
+  if (end <= start || text.trimStart().startsWith("[")) return "";
   try {
     const parsed = JSON.parse(text.slice(start, end + 1)) as { title?: unknown };
     return typeof parsed?.title === "string" ? parsed.title : "";
   } catch {
-    return undefined;
+    return "";
   }
 }
 
@@ -209,6 +211,11 @@ export function cleanTitle(raw: string): string {
   let text = stripFence(raw.trim());
   const json = titleFromJson(text);
   if (json !== undefined) text = json;
+
+  // Model output is displayed in a terminal: remove escape sequences and hidden
+  // controls after JSON decoding (which can reintroduce escaped controls).
+  text = stripVTControlCharacters(text).replace(/\s+/gu, " ")
+    .replace(/[\p{Cc}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, "");
 
   // An explanation is appended after a dash. The title is what came first.
   // Only a spaced dash splits: "pi-session-panel" is one token, "A — B" is two.
@@ -237,7 +244,7 @@ export function cleanTitle(raw: string): string {
     "",
   );
 
-  return text.slice(0, 60).trim();
+  return Array.from(text).slice(0, 60).join("").trim();
 }
 
 /** The user turn Claude Code sends: the content in tags, then the language rule. */
@@ -334,12 +341,19 @@ export async function generateSessionTitle(
 }
 
 /**
- * Returns `maybeName`. It is safe to call from any hook, as often as you like:
+ * Returns `maybeName`. Call its cancel method at lifecycle boundaries.
+ * It is safe to call from any hook, as often as you like:
  * it returns immediately when there is nothing to do, and it never throws.
  */
 export function createNamer(options: NamerOptions) {
-  /** True only while a model call is in flight, so two hooks cannot race. */
-  let generating = false;
+  // Identity as well as cancellation matters: an old finally must not release
+  // the guard belonging to a newer request.
+  let active: AbortController | undefined;
+  const cancel = () => {
+    const previous = active;
+    active = undefined;
+    previous?.abort();
+  };
   /** Naming failures are reported once, not on every prompt. */
   let reportedBroken = false;
 
@@ -348,8 +362,8 @@ export function createNamer(options: NamerOptions) {
    * branch yet, so it has to be passed in; when it is absent, the branch is used,
    * which is what a resumed session needs.
    */
-  return async function maybeName(context: ExtensionContext, text?: string): Promise<void> {
-    if (generating) return;
+  async function maybeName(context: ExtensionContext, text?: string): Promise<void> {
+    if (active) return;
     if (context.sessionManager.getSessionName()?.trim()) return;
     const source = nameSource(context.sessionManager.getBranch(), text);
     if (!source) return;
@@ -368,9 +382,11 @@ export function createNamer(options: NamerOptions) {
     }
     const model = resolved.model;
 
-    generating = true;
+    const request = new AbortController();
+    active = request;
     try {
-      const title = await completeTitle(context, model, source);
+      const title = await completeTitle(context, model, source, request.signal);
+      if (active !== request || request.signal.aborted || options.model() !== spec) return;
       // Re-read the name before writing. The user may have renamed the session
       // while the model was thinking, and overwriting a typed name is the one
       // mistake here that cannot be undone.
@@ -382,7 +398,8 @@ export function createNamer(options: NamerOptions) {
       // Naming is a convenience. A failure must never surface, and the next
       // trigger tries again.
     } finally {
-      generating = false;
+      if (active === request) active = undefined;
     }
-  };
+  }
+  return Object.assign(maybeName, { cancel });
 }
