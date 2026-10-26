@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generateSessionTitle, createNamer, RENAME_CONTENT_LIMIT } from "../extension/naming.ts";
+import { generateSessionTitle, createNamer, capInput, RENAME_CONTENT_LIMIT } from "../extension/naming.ts";
 import { SessionsPanel } from "../extension/panel.ts";
 import extension from "../extension/index.ts";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
@@ -44,14 +44,16 @@ test("manual rename uses all selected-branch user prompts with the automatic mod
   assert.ok(prompt.includes(entries[0].message.content[0].text));
   assert.ok(prompt.includes("LATEST SUBJECT"));
   assert.doesNotMatch(prompt, /OFF-BRANCH|ASSISTANT TOPIC/);
-  assert.equal(requests[0].options.signal, controller.signal);
+  assert.ok(requests[0].options.signal instanceof AbortSignal);
+  assert.equal(requests[0].options.signal.aborted, false);
+  assert.equal(requests[0].options.maxTokens, 512);
   assert.equal(readFileSync(file, "utf8"), original, "generation must not write session_info");
   await createNamer({ pi: { setSessionName() {} } as any, model: () => "p/cheap" })(ctx);
   assert.equal(requests.length, 2);
   assert.equal(requests[0].request.systemPrompt, requests[1].request.systemPrompt);
 });
 
-test("manual rename truncates only the oldest joined user text", async t => {
+test("manual rename shares head-and-tail truncation with the larger budget", async t => {
   const prompts = ["OLD ".repeat(5000), "RECENT " + "z".repeat(2500), "NEWEST QUESTION"];
   const { file } = session(t, prompts);
   let text = "";
@@ -59,7 +61,7 @@ test("manual rename truncates only the oldest joined user text", async t => {
     text = request.messages[0].content; return { content: [{ type: "text", text: '{"title":"New topic"}' }] };
   } } } as any, file, "p/model");
   const content = text.slice("<session>\n".length, text.indexOf("\n</session>"));
-  assert.equal(content, prompts.join("\n").slice(-RENAME_CONTENT_LIMIT).trim());
+  assert.equal(content, capInput(prompts.join("\n"), RENAME_CONTENT_LIMIT).trim());
   assert.ok(content.endsWith("NEWEST QUESTION"));
   assert.ok(content.includes(prompts[1]));
 });
@@ -92,7 +94,7 @@ test("cancelling the provider request discards its late title without writing", 
   let deliver!: (value: any) => void;
   const pending = generateSessionTitle({ modelRegistry: {
     find: () => ({}), complete: async (_model: any, _request: any, options: any) => {
-      assert.equal(options.signal, controller.signal);
+      assert.ok(options.signal instanceof AbortSignal);
       return new Promise(resolve => { deliver = resolve; });
     },
   } } as any, file, "p/model", controller.signal);

@@ -506,7 +506,7 @@ test("cleanTitle takes the title field of a JSON reply", () => {
   assert.equal(cleanTitle('{"title": "Closed 分区不显示 subagents"}'), "Closed 分区不显示 subagents");
   assert.equal(cleanTitle('```json\n{"title": "Panel cache"}\n```'), "Panel cache");
   assert.equal(cleanTitle('Here you go: ' + JSON.stringify({ title: 'Spinner sync' }) + ' — enjoy'), 'Spinner sync');
-  assert.equal(cleanTitle(JSON.stringify({ notatitle: 1 })), 'notatitle 1');
+  assert.equal(cleanTitle(JSON.stringify({ notatitle: 1 })), '');
 });
 
 test("naming content is every human turn, in order, with no assistant or tool text", () => {
@@ -534,7 +534,7 @@ test("an unusable branch yields no name source", () => {
 test("a message too thin to name is skipped, in any script", () => {
   // Claude Code gates on a raw 10-character count, which is an English count: nine
   // Chinese characters is a whole question, ten Latin characters is a fragment.
-  const tooThin = ["hi", "继续", "ok", "   ", "!"];
+  const tooThin = ["hi", "继续", "ok", "   ", "!", "!".repeat(3000)];
   for (const content of tooThin) {
     const branch = [{ type: "message", message: { role: "user", content } }];
     assert.equal(nameSource(branch), undefined, JSON.stringify(content) + " must not spend a model call");
@@ -546,17 +546,18 @@ test("a message too thin to name is skipped, in any script", () => {
   }
 });
 
-test("an over-long message is elided in the middle, not truncated at the end", () => {
-  const head = "H".repeat(1500);
-  const middle = "M".repeat(3000);
-  const tail = "T".repeat(500);
-  const capped = capInput(head + middle + tail);
-  assert.equal(capped.length, 2000, "the result is capped at the input budget");
-  assert.ok(capped.startsWith(head), "the head survives");
-  assert.ok(capped.endsWith("T".repeat(400)), "the tail survives, because the ask is usually there");
-  assert.match(capped, /\[… 3500 characters omitted …\]/, "the omission is reported");
-
-  assert.equal(capInput("short enough"), "short enough", "a message under the cap is untouched");
+test("an over-long context preserves the task head and recent tail within its budget", () => {
+  const original = "H".repeat(1500) + "M".repeat(3000) + "T".repeat(500);
+  for (const limit of [1000, 2000]) {
+    const capped = capInput(original, limit);
+    assert.equal(capped.length, limit);
+    assert.ok(capped.startsWith("H".repeat(350)), "the original task survives");
+    assert.ok(capped.endsWith("T".repeat(500)), "the recent ask survives");
+    const marker = capped.match(/\n\[… (\d+) characters omitted …\]\n/)!;
+    assert.ok(marker, "an omission marker separates head and tail");
+    assert.equal(Number(marker[1]), original.length - (limit - marker[0].length));
+  }
+  assert.equal(capInput("short enough"), "short enough");
 });
 
 test("the user prompt wraps the content in session tags and states the language rule", () => {

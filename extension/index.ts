@@ -66,10 +66,10 @@ export default function (pi: ExtensionAPI) {
   // ── automatic naming ────────────────────────────────────────────────────────
   // Configured, not defaulted: which model is cheap is the user's call.
   writeConfigExample(agentDir);
-  const config = readConfig(agentDir);
   const maybeName = createNamer({
     pi,
-    model: () => config.titleModel,
+    model: () => readConfig(agentDir).titleModel,
+    syncName: () => syncSession(),
     onNamed: (name) => {
       self.name = name;
       publish();
@@ -418,6 +418,7 @@ const RESTORE_SESSION = "pi-sessions";
   pi.on("agent_settled", () => {
     self.state = "idle";
     self.workingSince = undefined;
+    syncSession();
     publish();
   });
 

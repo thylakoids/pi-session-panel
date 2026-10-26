@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { readConfig } from "../../extension/config.ts";
-import { generateSessionTitle, RENAME_CONTENT_LIMIT } from "../../extension/naming.ts";
+import { generateSessionTitle, capInput, RENAME_CONTENT_LIMIT } from "../../extension/naming.ts";
 import { SessionsPanel } from "../../extension/panel.ts";
 
 export default function (pi: any) {
@@ -29,7 +29,7 @@ export default function (pi: any) {
         calls++;
         assert.equal(`${selected.provider}/${selected.id}`, model);
         const source = request.messages[0].content.split("<session>\n")[1].split("\n</session>")[0];
-        assert.equal(source, prompts.join("\n").slice(-RENAME_CONTENT_LIMIT).trim());
+        assert.equal(source, capInput(prompts.join("\n"), RENAME_CONTENT_LIMIT).trim());
         return complete(selected, request, options);
       };
       let generated = "";

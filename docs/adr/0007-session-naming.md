@@ -26,10 +26,14 @@
 
 ## 并发
 
-`session_start` 和 `before_agent_start` 可能几乎同时触发。用一个 in-flight 标志挡住：正在生成时直接返回，`finally` 里清掉，成功失败都清。这样一个会话最多花一次模型调用，失败还能重试。
+`session_start` 和 `before_agent_start` 可能几乎同时触发。用一个 in-flight 标志挡住：正在生成时直接返回，`finally` 里清掉，成功失败都清。这样同一时刻最多有一次自动命名调用，失败还能重试。请求设 30 秒期限及 512 token 输出预算；取消或超时会释放 in-flight，即使 provider 忽略取消信号，迟到结果也不会写入。
 
 ## Consequences
 
-`before_agent_start` 触发时，当前这条 prompt 还没有进入 branch，所以文本必须从 `event.prompt` 传入；`session_start` 那条从 branch 读。两处共用同一个 `firstUserText`。
+`before_agent_start` 触发时，当前这条 prompt 还没有进入 branch，所以文本必须从 `event.prompt` 传入；`session_start` 那条从 branch 读。两处共用同一个 `nameSource`。
 
 配置必须写全 `provider/model`。model id 可能自带斜杠，所以只按第一个斜杠切分，其余部分原样作为 model id。解析不到就在会话里提示一次，不做任何猜测，也不接受简写。
+
+## 可靠性补充
+
+每次请求都读取当前 `titleModel`，不缓存启动时的配置。自动结果落盘前先接收其他面板的改名，再检查是否已有名字；Working 转 Idle 发布 registry 前也先同步，避免旧内存覆盖用户选择。JSON 对象缺少非空字符串 `title` 时视为失败，纯文本标题仍兼容。
