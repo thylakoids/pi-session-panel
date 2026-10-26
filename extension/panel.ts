@@ -5,7 +5,7 @@
  * the ones you act on; the closed section is long by nature and is the only
  * part that needs real scrolling.
  */
-import { decodeKittyPrintable, Input, isKeyRepeat, matchesKey, truncateToWidth as truncateGraphemes, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { decodeKittyPrintable, Input, isKeyRepeat, matchesKey, truncateToWidth as truncateGraphemes, visibleWidth, wrapTextWithAnsi, type KeyId } from "@earendil-works/pi-tui";
 import type { SessionRow, SessionState } from "./types.ts";
 import { formatAge, formatElapsed, shortCwd } from "./format.ts";
 import { matchSearch, parseSearch } from "./search.ts";
@@ -166,8 +166,11 @@ function createInput(value = ""): Input {
   return input;
 }
 
+/** Uppercase aliases keep the displayed shortcuts while matching typed shift keys. */
+type PanelKey = KeyId | "G" | "R";
+
 interface PanelCommand {
-  keys: string[];
+  keys: PanelKey[];
   action: string;
   run(data: string): void | Promise<void>;
   /** True uses normal priority; numbers put primary actions first. */
@@ -187,10 +190,11 @@ function commandKey(command: PanelCommand, compact = false): string {
   return command.label ?? keys.map((key) => KEY_LABELS[key] ?? key).join("/");
 }
 
-function bindingMatches(data: string, key: string): boolean {
+function bindingMatches(data: string, key: PanelKey): boolean {
+  const keyId: KeyId = key === "G" ? "shift+g" : key === "R" ? "shift+r" : key;
   return (key.length === 1 && (data === key || decodeKittyPrintable(data) === key)) ||
     (key === "return" && (data === "\r" || data === "\n")) ||
-    matchesKey(data, /^[A-Z]$/.test(key) ? `shift+${key.toLowerCase()}` : key);
+    matchesKey(data, keyId);
 }
 
 function commandMatches(command: PanelCommand, data: string): boolean {
@@ -380,7 +384,7 @@ export class SessionsPanel {
 
   /** One registry drives dispatch, help and mode-specific footer hints. */
   private commands(helpControls = true): PanelCommand[] {
-    const command = (keys: string[], action: string, run: PanelCommand["run"], footer: boolean | number = true, label?: string, primaryKeys?: number): PanelCommand =>
+    const command = (keys: PanelKey[], action: string, run: PanelCommand["run"], footer: boolean | number = true, label?: string, primaryKeys?: number): PanelCommand =>
       ({ keys, action, run, footer, label, primaryKeys });
     if (this.help && helpControls) return [
       ...(this.helpOverflow ? [command(["up", "down", "j", "k"], "scroll", (data) => {
