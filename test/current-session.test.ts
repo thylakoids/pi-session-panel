@@ -28,9 +28,9 @@ test("current row is initially visible and keeps a distinct full-width backgroun
   const view = panel(() => rows);
   backgrounds.length = 0;
   const first = view.render(painted, 80, 10);
-  assert.match(first.find(line => line.includes("here"))!, /❯ · here/);
+  assert.match(first.find(line => line.includes("here"))!, /❯ ○ here/);
   assert.ok(!first.join("\n").includes("[current]"));
-  assert.match(currentBackground()[0]!.text, /^❯ · here/);
+  assert.match(currentBackground()[0]!.text, /^❯ ○ here/);
   assert.equal(currentBackground().length, 1);
   assert.equal(visibleWidth(currentBackground()[0]!.text), 76);
   assert.equal(view.selectedKey(), "here");
@@ -38,7 +38,7 @@ test("current row is initially visible and keeps a distinct full-width backgroun
   backgrounds.length = 0;
   const lines = view.render(painted, 80, 10);
   assert.equal(view.selectedKey(), "other");
-  assert.match(lines.find(line => line.includes("here"))!, /· here/);
+  assert.match(lines.find(line => line.includes("here"))!, /○ here/);
   assert.ok(!lines.find(line => line.includes("here"))!.includes("❯"));
   assert.ok(lines.find(line => line.includes("other"))!.includes("❯"));
   assert.equal(currentBackground().length, 1);
@@ -64,7 +64,7 @@ test("opening a short panel scrolls the current Idle session into view below Wor
   const rows = Array.from({ length: 30 }, (_, index) => ({ ...row(`worker-${index}`), state: "working" as const }));
   const view = panel(() => [...rows, row("here", true)]);
   const text = view.render(theme, 80, 9).join("\n");
-  assert.match(text, /❯ · here/);
+  assert.match(text, /❯ ○ here/);
   assert.equal(view.selectedKey(), "here");
 });
 

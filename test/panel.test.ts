@@ -148,19 +148,21 @@ test("routine rows stay neutral and closed titles recede until selected", async 
     row({ key: "closed:target", state: "closed", sessionFile: "/tmp/target.jsonl", name: "closed title" }),
   ];
   const { instance } = panel(() => rows);
-  instance.render(painted, 80, 16);
+  const first = instance.render(painted, 80, 16).join("\n");
+  assert.match(first, /○ idle title/);
+  assert.match(first, /· closed title/);
   for (const title of ["working title", "idle title"]) {
     assert.ok(foregrounds.some(({ token, text }) => token === "text" && text === title));
   }
   assert.ok(foregrounds.some(({ token, text }) => token === "muted" && text === "closed title"));
-  assert.ok(foregrounds.some(({ token, text }) => token === "muted" && text === "○"));
+  assert.ok(foregrounds.some(({ token, text }) => token === "muted" && text === "·"));
   assert.ok(backgrounds.some(({ token, text }) => token === "selectedBg" && text.startsWith("❯") && visibleWidth(text) === 76));
   assert.ok(!foregrounds.some(({ token }) => /^(syntax|success|accent|warning|error)/.test(token)), "routine browsing adds no emphasis colors");
 
   await instance.handleInput("G");
   foregrounds.length = backgrounds.length = 0;
   instance.render(painted, 80, 16);
-  const selected = backgrounds.find(({ token, text }) => token === "selectedBg" && text.startsWith("❯ ○ closed title"));
+  const selected = backgrounds.find(({ token, text }) => token === "selectedBg" && text.startsWith("❯ · closed title"));
   assert.ok(selected && visibleWidth(selected.text) === 76, "closed selection fills the row");
   assert.ok(foregrounds.some(({ token, text }) => token === "text" && text === selected?.text), "selected closed rows regain normal contrast");
   assert.ok(!foregrounds.some(({ token, text }) => token === "muted" && text.includes("closed title")));
@@ -621,7 +623,7 @@ test("page keys navigate a screen at a time and Home/End reach the edges", async
   await instance.handleInput("\x1b[6~");
   const index = rows.findIndex((entry) => entry.key === instance.selectedKey());
   assert.ok(index > 1 && index < 10, "Page Down moves by the visible list height");
-  assert.match(instance.render(theme, 80, 12).join("\n"), new RegExp(`❯ · session ${index} `));
+  assert.match(instance.render(theme, 80, 12).join("\n"), new RegExp(`❯ ○ session ${index} `));
   await instance.handleInput("\x1b[5~");
   assert.equal(instance.selectedKey(), "live:0");
   await instance.handleInput("\x1b[F");

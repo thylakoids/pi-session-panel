@@ -62,8 +62,8 @@ const SECTION_TITLE: Record<Section, string> = {
 
 /** The resting and finished glyphs. Working rows animate instead. */
 const STATE_GLYPH: Record<Exclude<SessionState, "working">, string> = {
-  idle: "·",
-  closed: "○",
+  idle: "○",
+  closed: "·",
 };
 
 /**
