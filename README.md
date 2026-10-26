@@ -51,10 +51,12 @@ pi install ~/Agent/pi-session-panel
 | 分区 | 来源 | x 键的含义 |
 |---|---|---|
 | Working | 注册表里 `state: "working"` 的进程 | 打断当前运行（向 tmux pane 发 Esc） |
-| Idle | 注册表里 `state: "idle"` 的进程 | 核对登记的进程身份后发送 SIGTERM；无法确认时拒绝退出 |
+| Idle | 注册表里 `state: "idle"` 的进程 | 目标核对实例凭据、会话和 Idle 状态后自行优雅退出 |
 | Closed | `SessionManager.listAll()`，与 `pi -r` 同源 | 删除磁盘上的会话文件（需确认） |
 
-Idle 退出目前仅支持能读取 procfs 启动身份的 Linux。升级前已打开的 Pi 需要先 `/reload` 或重启以登记身份；不会给残留记录自动补登。macOS 和其他无法读取可靠启动身份的平台会拒绝退出，面板其他功能保留。PID 存活只用于列表显示；退出前还会核对所选行、最新注册记录及内核启动身份。校验与发送信号之间仍有竞态，详见 [ADR 0013](./docs/adr/0013-verify-process-identity-before-exit.md)。
+Idle 退出支持 macOS 和 Linux：更新后的目标 Pi 登记私有本地 socket 和每次加载独有的凭据，面板发送退出请求，目标在同一次回调中检查当前会话及 Idle 状态，再调用 Pi 的 `shutdown()`。PID 被复用、旧行、已开始 Working、会话变化或通道失联时拒绝；通道失败不会退回按 PID 强制退出。请求最多等 2 秒。
+
+升级后，**面板宿主和每个需要退出的目标 Pi 都要在空闲时 `/reload` 或重启**，再重新打开 `/sessions`。仅重载面板宿主不能替旧目标登记通道。旧 Linux 记录仍可使用原有 boot ID + 启动 tick 校验路径；没有可验证登记的旧记录提示重载目标，不能自动补造身份。详见 [ADR 0013](./docs/adr/0013-verify-process-identity-before-exit.md)。
 
 ## 显示名
 
@@ -110,6 +112,14 @@ npm test
 ```
 
 运行测试覆盖列表、搜索、改名、删除确认和会话动作。
+
+真实退出端到端测试（默认跳过，不调用模型）：
+
+```bash
+PI_PANEL_EXIT_LIVE=1 node --test --experimental-strip-types test/exit-live.test.ts
+```
+
+使用已安装的 Pi 与独立 tmux socket，在临时设置、registry 和会话里验证真实 `/sessions` 的 Idle `x`、目标正常退出、真实 `/reload` 和旧凭据拒绝。忙状态由真实运行停在首个 provider 请求前构造，验证退出拒绝后先 abort，再正常退出；不测试模型流式响应中的退出，也不接触现有会话。结果和终端文本保存在输出的 `/tmp/pi-panel-exit-live-*` 目录；可用 `PI_TEST_PI` 指定 Pi 可执行文件。
 
 真实模型检查（会产生一次命名调用，默认测试跳过）：
 

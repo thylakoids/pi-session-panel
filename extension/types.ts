@@ -1,3 +1,4 @@
+import type { ExitControl } from "./exit-control.ts";
 /** Shared vocabulary for the panel. See GLOSSARY.md. */
 
 export type SessionState = "working" | "idle" | "closed";
@@ -7,6 +8,8 @@ export interface SessionRow {
   key: string;
   /** Registered process birth identity, retained even if the PID is reused. */
   processIdentity?: string;
+  /** Target-owned exit channel, available after loading the updated extension. */
+  exitControl?: ExitControl;
   state: SessionState;
   /** The panel's host session, independent of the keyboard selection. */
   current?: boolean;

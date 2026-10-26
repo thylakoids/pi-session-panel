@@ -21,6 +21,7 @@ import type { SessionRow } from "./types.ts";
 import { focusTmuxPane } from "./tmux-focus.ts";
 import { readProcessIdentity } from "./process-identity.ts";
 import { stopRegisteredSession } from "./exit.ts";
+import { createExitControl, type ExitControl, type ExitController } from "./exit-control.ts";
 
 /** Run one tmux command, surfacing its stderr as the error message. */
 function runTmux(args: string[]): string {
@@ -55,6 +56,7 @@ export default function (pi: ExtensionAPI) {
   const self = {
     pid: process.pid,
     processIdentity: readProcessIdentity(process.pid),
+    exitControl: undefined as ExitControl | undefined,
     cwd: process.cwd(),
     state: "idle" as RegistryRecord["state"],
     workingSince: undefined as number | undefined,
@@ -91,6 +93,32 @@ export default function (pi: ExtensionAPI) {
     } catch {
       // A read-only or missing agent dir must not break the session.
     }
+  };
+
+  let exitController: ExitController | undefined;
+  let exitGeneration = 0;
+  const closeExitControl = () => {
+    exitGeneration++;
+    self.exitControl = undefined;
+    exitController?.close();
+    exitController = undefined;
+  };
+  const openExitControl = () => {
+    closeExitControl();
+    const generation = exitGeneration;
+    void createExitControl({
+      target: () => ({ pid: self.pid, sessionFile: ctx?.sessionManager.getSessionFile(),
+        idle: Boolean(ctx && self.state === "idle" && ctx.isIdle()) }),
+      shutdown: () => ctx?.shutdown(),
+    }).then(controller => {
+      if (generation !== exitGeneration) { controller.close(); return; }
+      exitController = controller;
+      self.exitControl = controller.registration;
+      publish();
+    }).catch(() => {
+      // Socket setup must not prevent Pi from starting. Without a channel,
+      // only the existing verifiable Linux registration can authorize exit.
+    });
   };
 
   /** Keep the record's session file and name in step with the real session. */
@@ -323,8 +351,8 @@ const RESTORE_SESSION = "pi-sessions";
   };
 
   /** Idle rows: ask the process to exit. */
-  const exit = (row: SessionRow) => {
-    stopRegisteredSession(registry, row);
+  const exit = async (row: SessionRow) => {
+    await stopRegisteredSession(registry, row);
     // The row lands in Closed straight away, without rescanning the disk.
     if (closedIndex) {
       closedIndex = insertClosed(closedIndex, {
@@ -335,6 +363,7 @@ const RESTORE_SESSION = "pi-sessions";
         workingSince: undefined,
         pane: undefined,
         processIdentity: undefined,
+        exitControl: undefined,
       });
     }
   };
@@ -388,6 +417,7 @@ const RESTORE_SESSION = "pi-sessions";
     syncSession();
     self.state = "idle";
     publish();
+    openExitControl();
     // A resumed session may already have messages and no name; name it now.
     // Never awaited: naming must not delay startup.
     void maybeName(context);
@@ -432,6 +462,7 @@ const RESTORE_SESSION = "pi-sessions";
   });
 
   pi.on("session_shutdown", () => {
+    closeExitControl();
     maybeName.cancel();
     removeRecord(registry, self.pid);
   });

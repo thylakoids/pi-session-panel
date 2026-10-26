@@ -1,3 +1,4 @@
+import type { ExitControl } from "./exit-control.ts";
 /**
  * The registry: one file per live pi process, under
  * `~/.pi/agent/session-panel/registry/<pid>.json`.
@@ -13,6 +14,8 @@ export interface RegistryRecord {
   pid: number;
   /** Immutable birth identity captured by this Pi. Missing in legacy records. */
   processIdentity?: string;
+  /** Target-owned exit channel, available after loading the updated extension. */
+  exitControl?: ExitControl;
   /** Session JSONL path, when the session is persisted. */
   sessionFile?: string;
   /** Session name, when the user or a model gave it one. */

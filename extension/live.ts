@@ -88,6 +88,7 @@ export function rowFromRecord(record: RegistryRecord, host?: Pick<RegistryRecord
   return {
     key: `live:${record.pid}`,
     processIdentity: record.processIdentity,
+    exitControl: record.exitControl,
     state: record.state,
     current: Boolean(host && (record.pid === host.pid || (host.sessionFile && record.sessionFile === host.sessionFile))),
     // A session that has said nothing yet has no name and no first message. The
