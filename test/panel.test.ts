@@ -134,27 +134,46 @@ test("narrow lists give titles space before directory and age columns", () => {
   assert.doesNotMatch(lines.join("\n"), /VeryLongDirectory|2m/);
 });
 
-test("selection fills the content width and identity colors survive rename and reopening", () => {
+test("routine rows stay neutral and closed titles recede until selected", async () => {
   const foregrounds: { token: string; text: string }[] = [];
   const backgrounds: { token: string; text: string }[] = [];
   const painted = { ...theme,
     fg: (token: string, text: string) => { foregrounds.push({ token, text }); return text; },
     bg: (token: string, text: string) => { backgrounds.push({ token, text }); return text; },
   };
-  let rows = [row({ key: "live:anchor", name: "anchor" }), row({ key: "closed:target", state: "closed", sessionFile: "/tmp/target.jsonl", name: "before" })];
+  let rows = [
+    row({ key: "live:anchor", name: "anchor", state: "working" }),
+    row({ key: "live:working", name: "working title", state: "working" }),
+    row({ key: "live:idle", name: "idle title" }),
+    row({ key: "closed:target", state: "closed", sessionFile: "/tmp/target.jsonl", name: "closed title" }),
+  ];
   const { instance } = panel(() => rows);
-  instance.render(painted, 80, 12);
-  const identity = foregrounds.find(({ text }) => text === "before")?.token;
-  assert.match(identity ?? "", /^syntax/);
-  assert.ok(backgrounds.some(({ token, text }) => token === "selectedBg" && text.startsWith("❯ · anchor") && visibleWidth(text) === 76));
-  assert.ok(foregrounds.some(({ token, text }) => token === "dim" && text === "○"));
+  instance.render(painted, 80, 16);
+  for (const title of ["working title", "idle title"]) {
+    assert.ok(foregrounds.some(({ token, text }) => token === "text" && text === title));
+  }
+  assert.ok(foregrounds.some(({ token, text }) => token === "muted" && text === "closed title"));
+  assert.ok(foregrounds.some(({ token, text }) => token === "muted" && text === "○"));
+  assert.ok(backgrounds.some(({ token, text }) => token === "selectedBg" && text.startsWith("❯") && visibleWidth(text) === 76));
+  assert.ok(!foregrounds.some(({ token }) => /^(syntax|success|accent|warning|error)/.test(token)), "routine browsing adds no emphasis colors");
 
-  rows = [rows[0]!, row({ key: "live:42", sessionFile: "/tmp/target.jsonl", name: "after", state: "working", updatedAt: Date.now() + 1 })];
+  await instance.handleInput("G");
+  foregrounds.length = backgrounds.length = 0;
+  instance.render(painted, 80, 16);
+  const selected = backgrounds.find(({ token, text }) => token === "selectedBg" && text.startsWith("❯ ○ closed title"));
+  assert.ok(selected && visibleWidth(selected.text) === 76, "closed selection fills the row");
+  assert.ok(foregrounds.some(({ token, text }) => token === "text" && text === selected?.text), "selected closed rows regain normal contrast");
+  assert.ok(!foregrounds.some(({ token, text }) => token === "muted" && text.includes("closed title")));
+
+  rows = rows.map((entry) => entry.key === "closed:target"
+    ? row({ key: "live:reopened", sessionFile: "/tmp/target.jsonl", name: "renamed and reopened", state: "idle" })
+    : entry);
+  await instance.handleInput("\x1b[H");
   foregrounds.length = 0;
-  instance.render(painted, 80, 12);
-  assert.equal(foregrounds.find(({ text }) => text === "after")?.token, identity);
-  assert.ok(foregrounds.some(({ token }) => token === "success"), "working indicator uses its status color");
+  instance.render(painted, 80, 16);
+  assert.ok(foregrounds.some(({ token, text }) => token === "text" && text === "renamed and reopened"), "reopened rows use normal text");
 });
+
 
 test("background refresh preserves group order, selection and an active rename draft", async () => {
   let rows = [row({ key: "live:1", name: "first" }), row({ key: "live:2", name: "second" })];

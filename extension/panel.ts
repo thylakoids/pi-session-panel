@@ -66,16 +66,6 @@ const STATE_GLYPH: Record<Exclude<SessionState, "working">, string> = {
   closed: "○",
 };
 
-const IDENTITY_COLORS = ["syntaxKeyword", "syntaxFunction", "syntaxString", "syntaxNumber", "syntaxType", "syntaxVariable"] as const;
-
-function identityColor(row: SessionRow): typeof IDENTITY_COLORS[number] {
-  // The file survives reopening; the process key and title do not.
-  const identity = row.sessionFile ?? row.sessionId ?? row.key;
-  let hash = 0x811c9dc5;
-  for (const byte of new TextEncoder().encode(identity)) hash = Math.imul(hash ^ byte, 0x01000193) >>> 0;
-  return IDENTITY_COLORS[hash % IDENTITY_COLORS.length]!;
-}
-
 /**
  * The working glyph, following Claude Code 2.1.304.
  *
@@ -814,7 +804,7 @@ export class SessionsPanel {
 
   private renderFrame(theme: any, width: number, height: number, at: number): string[] {
     const inner = Math.max(1, width - 4);
-    const border = (s: string) => theme.fg("accent", s);
+    const border = (s: string) => theme.fg("borderMuted", s);
     const total = this.nodes().length;
     const groups = this.grouped();
     const liveCount = groups.get("working")!.length + groups.get("idle")!.length;
@@ -874,11 +864,12 @@ export class SessionsPanel {
         const age = truncateToWidth(ageOf(row, at), ageWidth, "…");
         const right = rightWidth ? (folderWidth ? padEndVisible(folder, folderWidth) + "  " : "") + padStartVisible(age, ageWidth) + " " : "";
         const glyph = row.state === "working" ? spinnerFrame(at) : STATE_GLYPH[row.state];
-        const styledGlyph = theme.fg(row.state === "working" ? "success" : row.state === "idle" ? "accent" : "dim", glyph);
+        // Routine states stay neutral; glyphs and section labels convey status.
+        const styledGlyph = theme.fg("muted", glyph);
         const name = row.current ? theme.bold(row.name) : row.name;
         const left = isSelected
           ? `❯ ${glyph} ${name}`
-          : `  ${styledGlyph} ${theme.fg(identityColor(row), name)}`;
+          : `  ${styledGlyph} ${theme.fg(row.state === "closed" && !row.current ? "muted" : "text", name)}`;
         const clippedLeft = truncateToWidth(left, Math.max(1, inner - rightWidth - (rightWidth ? 2 : 0)), "…");
         const line = clippedLeft
           + " ".repeat(Math.max(0, inner - visibleWidth(clippedLeft) - rightWidth))
