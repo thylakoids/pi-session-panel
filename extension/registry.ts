@@ -11,6 +11,8 @@ import { join } from "node:path";
 
 export interface RegistryRecord {
   pid: number;
+  /** Immutable birth identity captured by this Pi. Missing in legacy records. */
+  processIdentity?: string;
   /** Session JSONL path, when the session is persisted. */
   sessionFile?: string;
   /** Session name, when the user or a model gave it one. */
@@ -34,6 +36,17 @@ export function registryDir(agentDir: string): string {
 
 function recordPath(dir: string, pid: number): string {
   return join(dir, String(pid), "record.json");
+}
+
+/** Read one self-reported record, binding its contents to its directory PID. */
+export function readRecord(dir: string, pid: number): RegistryRecord | undefined {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  try {
+    const record = JSON.parse(readFileSync(recordPath(dir, pid), "utf8"));
+    return record && record.pid === pid ? record as RegistryRecord : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -65,7 +78,7 @@ export function removeRecord(dir: string, pid: number): void {
 
 /** Whether a pid is alive. Signal 0 checks existence without touching it. */
 export function isAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
@@ -76,7 +89,7 @@ export function isAlive(pid: number): boolean {
 }
 
 export interface RegistryRead {
-  /** Records whose process is still alive. */
+  /** Records whose PID exists; this is a display hint, not proof of identity. */
   live: RegistryRecord[];
   /** Pids whose record was stale and has been cleaned up. */
   cleaned: number[];
@@ -84,9 +97,8 @@ export interface RegistryRead {
 
 /**
  * Read every record, drop the ones whose process is gone, and clean up their
- * files. A pid can be reused by an unrelated process, which would keep a stale
- * record alive; that is the price of not adding a heartbeat, and it resolves on
- * the next restart of the machine.
+ * files. A reused PID can keep a stale record visible. Destructive actions must
+ * independently verify its registered birth identity; kill(pid, 0) is not proof.
  */
 export function readRegistry(dir: string): RegistryRead {
   let entries: string[];
@@ -100,12 +112,10 @@ export function readRegistry(dir: string): RegistryRead {
   const cleaned: number[] = [];
   for (const entry of entries) {
     const pid = Number(entry);
-    if (!Number.isInteger(pid) || pid <= 0) continue;
+    if (!Number.isSafeInteger(pid) || pid <= 0 || entry !== String(pid)) continue;
     const path = recordPath(dir, pid);
-    let record: RegistryRecord;
-    try {
-      record = JSON.parse(readFileSync(path, "utf8")) as RegistryRecord;
-    } catch {
+    const record = readRecord(dir, pid);
+    if (!record) {
       // A record that cannot be parsed is worthless; drop it and its directory.
       try { unlinkSync(path); } catch {}
       try { rmdirSync(join(dir, entry)); } catch {}

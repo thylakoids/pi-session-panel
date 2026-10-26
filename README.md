@@ -49,8 +49,10 @@ pi install ~/Agent/pi-session-panel
 | 分区 | 来源 | x 键的含义 |
 |---|---|---|
 | Working | 注册表里 `state: "working"` 的进程 | 打断当前运行（向 tmux pane 发 Esc） |
-| Idle | 注册表里 `state: "idle"` 的进程 | 优雅退出（SIGTERM），立刻落入 Closed |
+| Idle | 注册表里 `state: "idle"` 的进程 | 核对登记的进程身份后发送 SIGTERM；无法确认时拒绝退出 |
 | Closed | `SessionManager.listAll()`，与 `pi -r` 同源 | 删除磁盘上的会话文件（需确认） |
+
+Idle 退出目前仅支持能读取 procfs 启动身份的 Linux。升级前已打开的 Pi 需要先 `/reload` 或重启以登记身份；不会给残留记录自动补登。macOS 和其他无法读取可靠启动身份的平台会拒绝退出，面板其他功能保留。PID 存活只用于列表显示；退出前还会核对所选行、最新注册记录及内核启动身份。校验与发送信号之间仍有竞态，详见 [ADR 0013](./docs/adr/0013-verify-process-identity-before-exit.md)。
 
 ## 显示名
 

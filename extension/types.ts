@@ -5,6 +5,8 @@ export type SessionState = "working" | "idle" | "closed";
 export interface SessionRow {
   /** Stable identity for selection: registry pid for live rows, file path for closed. */
   key: string;
+  /** Registered process birth identity, retained even if the PID is reused. */
+  processIdentity?: string;
   state: SessionState;
   /** The panel's host session, independent of the keyboard selection. */
   current?: boolean;

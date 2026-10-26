@@ -87,6 +87,7 @@ export function rowFromRecord(record: RegistryRecord, host?: Pick<RegistryRecord
   const fromFile = named ? undefined : record.sessionFile ? cachedFirstUserMessage(record.sessionFile) : undefined;
   return {
     key: `live:${record.pid}`,
+    processIdentity: record.processIdentity,
     state: record.state,
     current: Boolean(host && (record.pid === host.pid || (host.sessionFile && record.sessionFile === host.sessionFile))),
     // A session that has said nothing yet has no name and no first message. The

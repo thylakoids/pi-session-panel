@@ -19,6 +19,8 @@ import { dedupeLive, ownPane, rowFromRecord, withoutLiveDuplicates } from "./liv
 import { readRegistry, registryDir, removeRecord, writeRecord, type RegistryRecord } from "./registry.ts";
 import type { SessionRow } from "./types.ts";
 import { focusTmuxPane } from "./tmux-focus.ts";
+import { readProcessIdentity } from "./process-identity.ts";
+import { stopRegisteredSession } from "./exit.ts";
 
 /** Run one tmux command, surfacing its stderr as the error message. */
 function runTmux(args: string[]): string {
@@ -52,6 +54,7 @@ export default function (pi: ExtensionAPI) {
   /** This process's own state, mirrored into the registry on every change. */
   const self = {
     pid: process.pid,
+    processIdentity: readProcessIdentity(process.pid),
     cwd: process.cwd(),
     state: "idle" as RegistryRecord["state"],
     workingSince: undefined as number | undefined,
@@ -321,13 +324,7 @@ const RESTORE_SESSION = "pi-sessions";
 
   /** Idle rows: ask the process to exit. */
   const exit = (row: SessionRow) => {
-    const pid = Number(row.key.replace("live:", ""));
-    if (!Number.isInteger(pid)) throw new Error("This session has no process to stop.");
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch (error) {
-      throw new Error(`Could not stop pid ${pid}: ${(error as Error).message}`);
-    }
+    stopRegisteredSession(registry, row);
     // The row lands in Closed straight away, without rescanning the disk.
     if (closedIndex) {
       closedIndex = insertClosed(closedIndex, {
@@ -337,6 +334,7 @@ const RESTORE_SESSION = "pi-sessions";
         updatedAt: Date.now(),
         workingSince: undefined,
         pane: undefined,
+        processIdentity: undefined,
       });
     }
   };
