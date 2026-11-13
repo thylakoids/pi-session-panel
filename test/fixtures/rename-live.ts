@@ -50,7 +50,9 @@ export default function (pi: any) {
       assert.equal(calls, 1);
       assert.equal(readFileSync(file, "utf8"), original, "the model must only create a draft");
       assert.match(generated, /panel|session|naming|rename|会话|命名/i);
-      assert.ok(panel.render(theme, 90, 12).join("\n").includes(generated));
+      const draft = panel.render(theme, 90, 12).join("\n");
+      assert.ok(draft.includes(Array.from(generated).slice(-8).join("")), "the inline editor shows the end of its draft");
+      assert.ok(draft.includes("Sessions") && draft.includes("Closed"), "generation keeps the session list visible");
       await panel.handleInput("\r");
       assert.equal(SessionManager.open(file).getSessionName(), generated);
       writeFileSync(join(dir, "result.json"), JSON.stringify({ ok: true, model, title: generated, calls, checks: ["selected-branch-tail", "same-model-api", "draft-only", "enter-saves"] }));

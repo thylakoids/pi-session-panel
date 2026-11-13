@@ -131,7 +131,7 @@ test("unrecognized keys and hidden animations do not invalidate a cached frame",
   assert.equal(view.needsRedraw(theme, 100, 10), false, "an offscreen spinner must not drive redraws");
 });
 
-test("help remains still while worker clocks advance", async t => {
+test("help remains still while inline rename keeps visible worker clocks running", async t => {
   let at = 0;
   t.mock.method(Date, "now", () => at);
   const rows = [{ ...row("worker"), state: "working" as const, workingSince: 0 }];
@@ -142,4 +142,12 @@ test("help remains still while worker clocks advance", async t => {
   at += 12345;
   assert.equal(view.needsRedraw(theme, 100, 20), false);
   assert.equal(view.render(theme, 100, 20), help);
+  await view.handleInput("\x1b");
+  await view.handleInput("r");
+  const editing = view.render(theme, 100, 20);
+  assert.match(editing.join("\n"), /Working/);
+  assert.match(editing.join("\n"), /enter save/);
+  at += 1000;
+  assert.equal(view.needsRedraw(theme, 100, 20), true);
+  assert.notEqual(view.render(theme, 100, 20), editing);
 });

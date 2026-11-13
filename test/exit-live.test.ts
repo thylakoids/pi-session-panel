@@ -15,7 +15,7 @@ async function until(check: () => boolean, label: string, ms = 10_000) {
   while (!check()) { assert.ok(Date.now() < deadline, label); await pause(); }
 }
 
-test("real Pi TUI exits Idle targets; reload and stale/busy checks remain safe", {
+test("real Pi TUI renames inline and exits Idle targets; reload and stale/busy checks remain safe", {
   skip: process.env.PI_PANEL_EXIT_LIVE !== "1", timeout: 60_000,
 }, async t => {
   const dir = mkdtempSync("/tmp/pi-panel-exit-live-");
@@ -92,6 +92,29 @@ test("real Pi TUI exits Idle targets; reload and stale/busy checks remain safe",
   await until(() => capture(host.pane).includes("40 closed"), "history scan must index the live target before X");
   tmux(["send-keys", "-t", host.pane, "Home"]);
   await until(() => /❯\s+○\s+E2E target/.test(capture(host.pane)), "the selected Idle row must be the fixture target");
+  // Rename uses the selected list row; editing never replaces the session list.
+  const send = (...keys: string[]) => tmux(["send-keys", "-t", host.pane, ...keys]);
+  const savedName = () => readFileSync(target.file, "utf8").trim().split("\n").map(line => JSON.parse(line))
+    .filter(entry => entry.type === "session_info").at(-1)?.name;
+  send("-l", "r");
+  await until(() => capture(host.pane).includes("enter save"), "inline rename must become editable");
+  const editing = capture(host.pane);
+  for (const label of ["Sessions", "Idle", "Closed", "E2E host", "Older history 0"]) assert.ok(editing.includes(label), label);
+  assert.doesNotMatch(editing, /Rename session/);
+  assert.equal(savedName(), "E2E target", "opening rename must not write");
+  writeFileSync(join(dir, "panel-inline-rename.txt"), editing);
+  send("Left"); send("-l", "X"); send("Enter");
+  await until(() => record(target.file)?.name === "E2E targeXt", "the caret edit must save the selected session");
+  assert.equal(savedName(), "E2E targeXt");
+  send("-l", "r");
+  await until(() => capture(host.pane).includes("enter save"), "rename must reopen in the same row");
+  send("-l", "discard"); send("Escape");
+  await until(() => !capture(host.pane).includes("enter save"), "Escape must cancel the inline draft");
+  assert.equal(savedName(), "E2E targeXt");
+  send("-l", "r");
+  await until(() => capture(host.pane).includes("enter save"), "restore the original fixture name inline");
+  send("C-u"); send("-l", "E2E target"); send("Enter");
+  await until(() => record(target.file)?.name === "E2E target", "saving must restore the original fixture name");
   writeFileSync(join(dir, "panel-before-x.txt"), capture(host.pane));
   tmux(["send-keys", "-t", host.pane, "-l", "x"]);
   await until(() => !alive(target.pane), "real panel X must let target Pi exit itself");

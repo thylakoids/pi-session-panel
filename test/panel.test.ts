@@ -563,8 +563,13 @@ test("a failed search action leaves the query editable", async () => {
   assert.deepEqual(calls, []);
 });
 
-test("rename edits at the caret, not at the end", async () => {
-  const rows = [row({ key: "live:1", name: "abc" })];
+test("rename edits the selected row in place and keeps the full session list", async () => {
+  const rows = [
+    row({ key: "worker", state: "working", name: "Worker" }),
+    row({ key: "live:1", name: "abc", current: true }),
+    row({ key: "other", name: "Other idle" }),
+    row({ key: "closed:history", state: "closed", name: "History" }),
+  ];
   const renamed: string[] = [];
   const { instance } = panel(() => rows, { rename: (_row: any, next: string) => renamed.push(next) });
   instance.handleInput("r");
@@ -574,7 +579,9 @@ test("rename edits at the caret, not at the end", async () => {
   // The caret is drawn where it is, not at the end of the draft: the whole point
   // of moving it is that the next character lands in a visible place.
   const drawn = instance.render(theme, 80, 20).join("\n");
-  assert.ok(drawn.includes(`❯ a${CURSOR_MARKER}${renderFakeCursor("b")}c`), "the caret highlights b without shifting c");
+  assert.ok(drawn.includes(`❯ ○ a${CURSOR_MARKER}${renderFakeCursor("b")}c`), "the caret stays in the selected row");
+  for (const text of ["Sessions", "Working", "Idle", "Closed", "Worker", "Other idle", "History"]) assert.ok(drawn.includes(text), text);
+  assert.doesNotMatch(drawn, /Rename session/);
 
   instance.handleInput("X");
   await instance.handleInput("\r");
@@ -610,7 +617,7 @@ test("Kitty keyboard events dispatch shortcuts and insert printable text", async
   assert.deepEqual(renamed, ["abcX"]);
 });
 
-test("short rename panels show save errors next to the editable draft", async () => {
+test("short lists show save errors next to the inline rename draft", async () => {
   const { instance } = panel(() => [row()], { rename: () => { throw new Error("write failed"); } });
   await instance.handleInput("r");
   await instance.handleInput("X");

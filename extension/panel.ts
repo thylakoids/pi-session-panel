@@ -298,7 +298,7 @@ export class SessionsPanel {
           }
         }, false, "home/end/gg/G"),
         command(["return", "right"], "open", open, 30),
-        command(["r"], "rename", () => { this.rename = { row, input: createInput(row.name) }; }, false),
+        command(["r"], "rename", () => { this.rename = { row, input: createInput(row.name, "") }; }, false),
         command(["x"], row.state === "working" ? "interrupt" : row.state === "idle" ? "exit" : "delete", () => this.pressX(), false),
       ] : []),
       command(["/"], "search", () => { this.searching = true; this.searchInput = createInput(this.query); }, 50),
@@ -392,7 +392,7 @@ export class SessionsPanel {
     try {
       const title = await this.options.actions.generateName(edit.row, controller.signal);
       if (this.disposed || this.rename !== edit || controller.signal.aborted) return;
-      edit.input = createInput(title);
+      edit.input = createInput(title, "");
     } catch (error) {
       if (!controller.signal.aborted && this.rename === edit && !this.disposed) {
         this.error = error instanceof Error ? error.message : String(error);
@@ -507,7 +507,7 @@ export class SessionsPanel {
   }
 
   private frameKey(theme: any, width: number, height: number, at: number): string {
-    const browsing = !this.help && !this.rename;
+    const browsing = !this.help;
     const working = browsing && this.nodes().slice(this.windowStart, this.windowStart + this.pageSize).some(n => n.row?.state === "working");
     return [width, height, theme?.name, theme?.appearance, this.revision,
       browsing ? Math.floor(at / 1000) : "", working ? spinnerGlyphAt(at) : ""].join("\0");
@@ -563,8 +563,6 @@ export class SessionsPanel {
     // list whose rows appear to be missing.
     const title = this.help
       ? "Keys"
-      : this.rename
-        ? "Rename session"
       : this.searching
           ? "Search"
           : this.query
@@ -574,15 +572,13 @@ export class SessionsPanel {
     const top = border(topBorder(title, info, width));
     const bottom = border("╰" + "─".repeat(Math.max(0, width - 2)) + "╯");
     const { budget, errorLines } = this.bodyBudget(height, inner);
-    const browsing = !this.help && !this.rename;
+    const browsing = !this.help;
     const hasAbove = browsing && this.windowStart > 0;
     const hasBelow = browsing && this.windowStart + budget < total;
 
     let body: string[] = [];
     if (this.help) {
       body = this.helpBody(theme, inner, Math.max(1, height - 5));
-    } else if (this.rename) {
-      body = this.rename.input.render(inner);
     } else {
       if (this.searching) body.push(this.searchInput.render(inner)[0]!);
       const nodes = this.nodes();
@@ -613,7 +609,9 @@ export class SessionsPanel {
         const glyph = row.state === "working" ? spinnerGlyphAt(at) : row.state === "idle" ? "○" : "·";
         const styledGlyph = theme.fg("muted", glyph);
         const leftWidth = Math.max(1, inner - rightWidth - (rightWidth ? 2 : 0));
-        const name = row.current ? theme.bold(row.name) : row.name;
+        const name = this.rename?.row.key === row.key
+          ? this.rename.input.render(Math.max(1, leftWidth - 4))[0]!
+          : row.current ? theme.bold(row.name) : row.name;
         const left = isSelected
           ? `❯ ${glyph} ${name}`
           : `  ${styledGlyph} ${theme.fg(row.state === "closed" && !row.current ? "muted" : "text", name)}`;

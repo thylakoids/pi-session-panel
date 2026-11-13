@@ -176,3 +176,35 @@ test("closing an indexed live session replaces its stale history row and moves i
   assert.equal(next.rows[0]!.sessionId, "target");
   assert.equal(next.rows[0]!.updatedAt, 100);
 });
+
+
+test("inline rename follows its session file into Closed and never saves to a replacement row", async () => {
+  let rows: SessionRow[] = [
+    { ...row("live:1"), state: "idle", name: "Original", sessionFile: "/original.jsonl" },
+    { ...row("live:2"), state: "idle", name: "Other", sessionFile: "/other.jsonl" },
+  ];
+  const saved: { key: string; file?: string; name: string }[] = [];
+  let focused = 0;
+  const view = new SessionsPanel({ rows: () => rows, close: noop, actions: { ...actions,
+    rename: (target, name) => { saved.push({ key: target.key, file: target.sessionFile, name }); },
+    focus: () => { focused++; },
+  } });
+  view.render(theme, 100, 12);
+  await view.handleInput("r");
+  await view.handleInput("X");
+  rows = [rows[1]!, { ...rows[0]!, key: "closed:/original.jsonl", state: "closed", name: "External name" }];
+  const editing = view.render(theme, 100, 12).join("\n");
+  assert.equal(view.selectedKey(), "closed:/original.jsonl");
+  assert.match(editing, /Closed/);
+  assert.match(editing, /OriginalX/);
+  assert.match(editing, /Other/);
+  await view.handleInput("\r");
+  assert.deepEqual(saved, [{ key: "closed:/original.jsonl", file: "/original.jsonl", name: "OriginalX" }]);
+  await view.handleInput("r");
+  rows = rows.slice(0, 1);
+  await view.handleInput("\r");
+  assert.equal(saved.length, 1);
+  assert.equal(focused, 0, "Enter from the abandoned edit must not open a different session");
+  assert.equal(view.isEditingText(), false);
+  assert.match(view.errorText()!, /no longer in the list/);
+});
