@@ -21,7 +21,8 @@ function session(t: any, prompts: string[]) {
     ...entries,
     { type: "message", id: "hidden", parentId: "u0", message: { role: "user", content: "OFF-BRANCH TOPIC" } },
     { type: "message", id: "assistant", parentId: entries.at(-1)!.id, message: { role: "assistant", content: [{ type: "text", text: "ASSISTANT TOPIC" }] } },
-    { type: "session_info", id: "name", parentId: "assistant", name: "Old name" },
+    { type: "message", id: "tool", parentId: "assistant", message: { role: "toolResult", content: [{ type: "text", text: "TOOL TOPIC" }] } },
+    { type: "session_info", id: "name", parentId: "tool", name: "Old name" },
   ].map(row => JSON.stringify(row)).join("\n") + "\n");
   return { file, entries };
 }
@@ -43,7 +44,10 @@ test("manual rename uses all selected-branch user prompts with the automatic mod
   const prompt = requests[0].request.messages[0].content;
   assert.ok(prompt.includes(entries[0].message.content[0].text));
   assert.ok(prompt.includes("LATEST SUBJECT"));
-  assert.doesNotMatch(prompt, /OFF-BRANCH|ASSISTANT TOPIC/);
+  assert.ok(prompt.indexOf(entries[0].message.content[0].text) < prompt.indexOf("LATEST SUBJECT"));
+  assert.match(prompt, /^<session>\n/);
+  assert.match(prompt, /predominant language of the session/);
+  assert.doesNotMatch(prompt, /OFF-BRANCH|ASSISTANT TOPIC|TOOL TOPIC/);
   assert.ok(requests[0].options.signal instanceof AbortSignal);
   assert.equal(requests[0].options.signal.aborted, false);
   assert.equal(requests[0].options.maxTokens, 512);
@@ -113,11 +117,12 @@ const settled = () => new Promise<void>(resolve => setImmediate(resolve));
 function editor(generateName: (row: any, signal: AbortSignal) => Promise<string>) {
   const saved: string[] = [];
   const row = { key: "selected", state: "closed" as const, name: "Old name", cwd: "/tmp", sessionFile: "/tmp/selected.jsonl", updatedAt: 1 };
-  const view = new SessionsPanel({ rows: () => [row], close() {}, actions: {
+  let rows = [row];
+  const view = new SessionsPanel({ rows: () => rows, close() {}, actions: {
     generateName, rename: (_row, name) => { saved.push(name); }, focus() {}, interrupt() {}, exit() {}, remove() {}, reopen() {}, rescan() {},
   } });
   view.render(theme, 80, 12);
-  return { view, saved };
+  return { view, saved, removeRow: () => { rows = []; } };
 }
 
 test("Rename Ctrl+G generates one editable draft; only Enter saves it", async () => {
@@ -147,7 +152,7 @@ test("Esc aborts generation and late results cannot overwrite a reopened rename 
   assert.match(view.render(theme, 80, 12).join("\n"), /Old name/);
 });
 
-test("generation failure preserves the manual draft, and disposing aborts an in-flight request", async () => {
+test("generation preserves a failed draft and cancels on disposal or target removal", async () => {
   const reply = deferred<string>(); let signal!: AbortSignal;
   const { view, saved } = editor(async (_row, input) => { signal = input; return reply.promise; });
   await view.handleInput("r"); await view.handleInput("X"); await view.handleInput("\x07");
@@ -155,9 +160,17 @@ test("generation failure preserves the manual draft, and disposing aborts an in-
   assert.match(view.errorText()!, /API unavailable/);
   assert.match(view.render(theme, 80, 12).join("\n"), /Old nameX/);
   assert.deepEqual(saved, []);
-  const next = editor(async (_row, input) => { signal = input; return new Promise(() => {}); });
-  await next.view.handleInput("r"); await next.view.handleInput("\x07"); next.view.dispose();
-  assert.equal(signal.aborted, true);
+  for (const ending of ["dispose", "remove"]) {
+    const late = deferred<string>();
+    const next = editor(async (_row, input) => { signal = input; return late.promise; });
+    await next.view.handleInput("r"); await next.view.handleInput("\x07");
+    if (ending === "dispose") next.view.dispose();
+    else { next.removeRow(); next.view.render(theme, 80, 12); }
+    assert.equal(signal.aborted, true, ending);
+    late.resolve("Late obsolete title"); await settled();
+    assert.deepEqual(next.saved, []);
+    assert.doesNotMatch(next.view.render(theme, 80, 12).join("\n"), /Late obsolete title/);
+  }
 });
 
 test("saving the current session rename updates Pi's in-memory name and survives the next turn", async t => {

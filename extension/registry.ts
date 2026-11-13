@@ -1,136 +1,84 @@
-import type { ExitControl } from "./exit-control.ts";
-/**
- * The registry: one file per live pi process, under
- * `~/.pi/agent/session-panel/registry/<pid>.json`.
- *
- * See docs/adr/0001. There is no fallback scan: a pi that never wrote a record
- * does not exist as far as the panel is concerned. Each process rewrites its own
- * record atomically when its state changes, and removes it when it exits.
- */
+/** One atomic self-reported record per PID. See docs/adr/0001 and 0013. */
 import { mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { ExitControl } from "./exit-control.ts";
 
 export interface RegistryRecord {
   pid: number;
-  /** Immutable birth identity captured by this Pi. Missing in legacy records. */
+  /** Linux process birth identity; legacy exit compatibility only. */
   processIdentity?: string;
-  /** Target-owned exit channel, available after loading the updated extension. */
+  /** Private, instance-authenticated shutdown channel. */
   exitControl?: ExitControl;
-  /** Session JSONL path, when the session is persisted. */
   sessionFile?: string;
-  /** Session name, when the user or a model gave it one. */
   name?: string;
   cwd: string;
-  /** "working" while a run is in flight, "idle" otherwise. */
   state: "working" | "idle";
-  /** When the current run started, epoch ms. Working only. */
   workingSince?: number;
-  /** Last activity, epoch ms. */
   updatedAt: number;
-  /** tmux pane target, when the session runs inside tmux. */
   pane?: string;
-  /** tmux session:window.pane, for the unregistered hint and for display. */
   paneLabel?: string;
 }
 
 export function registryDir(agentDir: string): string {
   return join(agentDir, "session-panel", "registry");
 }
+const recordPath = (dir: string, pid: number) => join(dir, String(pid), "record.json");
+const validPid = (pid: number) => Number.isSafeInteger(pid) && pid > 0;
 
-function recordPath(dir: string, pid: number): string {
-  return join(dir, String(pid), "record.json");
-}
-
-/** Read one self-reported record, binding its contents to its directory PID. */
+/** Bind the record to its PID and reject malformed display fields. */
 export function readRecord(dir: string, pid: number): RegistryRecord | undefined {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  if (!validPid(pid)) return undefined;
   try {
     const record = JSON.parse(readFileSync(recordPath(dir, pid), "utf8"));
-    return record && record.pid === pid ? record as RegistryRecord : undefined;
-  } catch {
-    return undefined;
-  }
+    if (!record || record.pid !== pid || typeof record.cwd !== "string" ||
+      !["working", "idle"].includes(record.state) || !Number.isFinite(record.updatedAt)) return undefined;
+    for (const key of ["name", "sessionFile", "pane", "processIdentity"]) {
+      if (record[key] !== undefined && typeof record[key] !== "string") return undefined;
+    }
+    if (record.workingSince !== undefined && !Number.isFinite(record.workingSince)) return undefined;
+    if (record.exitControl !== undefined && (typeof record.exitControl?.endpoint !== "string" || typeof record.exitControl?.token !== "string")) return undefined;
+    return record;
+  } catch { return undefined; }
 }
 
-/**
- * Write this process's record. Written to a temporary name and renamed so a
- * reader never sees a half-written file.
- */
 export function writeRecord(dir: string, record: RegistryRecord): void {
   const path = recordPath(dir, record.pid);
+  const temp = path + "." + process.pid + ".tmp";
   mkdirSync(join(dir, String(record.pid)), { recursive: true });
-  const temp = path + ".tmp";
   writeFileSync(temp, JSON.stringify(record));
   renameSync(temp, path);
 }
 
-/** Remove this process's record and its directory. Safe to call twice. */
 export function removeRecord(dir: string, pid: number): void {
-  const path = recordPath(dir, pid);
-  try {
-    unlinkSync(path);
-  } catch {
-    // Already gone.
-  }
-  try {
-    rmdirSync(join(dir, String(pid)));
-  } catch {
-    // Not empty or already gone.
-  }
+  try { unlinkSync(recordPath(dir, pid)); } catch { /* Already gone. */ }
+  try { rmdirSync(join(dir, String(pid))); } catch { /* Not empty or gone. */ }
 }
 
-/** Whether a pid is alive. Signal 0 checks existence without touching it. */
+/** Liveness is a display hint; destructive actions must verify instance identity. */
 export function isAlive(pid: number): boolean {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // EPERM means the process exists but belongs to someone else.
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
+  if (!validPid(pid)) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
 }
 
 export interface RegistryRead {
-  /** Records whose PID exists; this is a display hint, not proof of identity. */
   live: RegistryRecord[];
-  /** Pids whose record was stale and has been cleaned up. */
   cleaned: number[];
 }
 
-/**
- * Read every record, drop the ones whose process is gone, and clean up their
- * files. A reused PID can keep a stale record visible. Destructive actions must
- * independently verify its registered birth identity; kill(pid, 0) is not proof.
- */
 export function readRegistry(dir: string): RegistryRead {
+  const result: RegistryRead = { live: [], cleaned: [] };
   let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return { live: [], cleaned: [] };
-  }
-
-  const live: RegistryRecord[] = [];
-  const cleaned: number[] = [];
+  try { entries = readdirSync(dir); } catch { return result; }
   for (const entry of entries) {
     const pid = Number(entry);
-    if (!Number.isSafeInteger(pid) || pid <= 0 || entry !== String(pid)) continue;
-    const path = recordPath(dir, pid);
+    if (!validPid(pid) || entry !== String(pid)) continue;
     const record = readRecord(dir, pid);
-    if (!record) {
-      // A record that cannot be parsed is worthless; drop it and its directory.
-      try { unlinkSync(path); } catch {}
-      try { rmdirSync(join(dir, entry)); } catch {}
-      continue;
-    }
-    if (isAlive(pid)) {
-      live.push(record);
-    } else {
-      cleaned.push(pid);
-      try { unlinkSync(path); } catch {}
-      try { rmdirSync(join(dir, entry)); } catch {}
+    if (record && isAlive(pid)) result.live.push(record);
+    else {
+      if (record) result.cleaned.push(pid);
+      removeRecord(dir, pid);
     }
   }
-  return { live, cleaned };
+  return result;
 }

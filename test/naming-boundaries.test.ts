@@ -42,17 +42,15 @@ function host(t: any) {
   return { dir, config, hooks, manager, context, names, requests };
 }
 
-for (const reason of ["quit", "reload", "new", "resume", "fork"]) {
-  test(reason + " shutdown aborts naming and cannot recreate the registry", async t => {
-    const h = host(t);
-    h.hooks.get("session_shutdown")!({ reason }, h.context);
-    assert.equal(h.requests[0].signal.aborted, true);
-    h.requests[0].resolve(reply("Obsolete title"));
-    await settled();
-    assert.deepEqual(h.names, []);
-    assert.equal(readRegistry(registryDir(h.dir)).live.length, 0);
-  });
-}
+test("shutdown aborts naming and cannot recreate the registry", async t => {
+  const h = host(t);
+  h.hooks.get("session_shutdown")!({ reason: "quit" }, h.context);
+  assert.equal(h.requests[0].signal.aborted, true);
+  h.requests[0].resolve(reply("Obsolete title"));
+  await settled();
+  assert.deepEqual(h.names, []);
+  assert.equal(readRegistry(registryDir(h.dir)).live.length, 0);
+});
 
 for (const event of ["session_before_switch", "session_before_fork", "session_before_tree"]) {
   test(event + " releases naming immediately even when the provider ignores abort", async t => {

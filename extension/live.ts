@@ -1,22 +1,9 @@
-/**
- * The live half of the panel: this process's own registry record, plus the rows
- * other live processes reported.
- */
+/** Registry records projected into live session rows. */
 import { closeSync, openSync, readSync, statSync } from "node:fs";
 import type { RegistryRecord } from "./registry.ts";
-import type { SessionRow } from "./types.ts";
+import { sameRows, type SessionRow } from "./types.ts";
 
-/** The tmux pane this process runs in, if any. */
-export function ownPane(): { pane?: string; label?: string } {
-  const pane = process.env.TMUX_PANE;
-  if (!pane) return {};
-  return { pane };
-}
-
-/**
- * Derived labels, keyed by file and invalidated by size+mtime. Reading a session
- * head is ~0.4ms, and rows are rebuilt every frame, so the result has to be kept.
- */
+/** Bounded fallback-label cache, invalidated by file size and mtime. */
 const labelCache = new Map<string, { stamp: string; label: string | undefined }>();
 
 function cachedFirstUserMessage(sessionFile: string): string | undefined {
@@ -30,22 +17,18 @@ function cachedFirstUserMessage(sessionFile: string): string | undefined {
   const hit = labelCache.get(sessionFile);
   if (hit && hit.stamp === stamp) return hit.label;
   const label = firstUserMessage(sessionFile);
+  if (labelCache.size >= 256) labelCache.delete(labelCache.keys().next().value!);
   labelCache.set(sessionFile, { stamp, label });
   return label;
 }
 
-/**
- * First user message in a session file, collapsed.
- *
- * Reads at most the first 256 KiB: the first user message is always near the top,
- * and some session files here are over 2 MiB.
- */
+/** First user message in a session file, collapsed. */
 function firstUserMessage(sessionFile: string): string | undefined {
   let head: string;
   try {
     const fd = openSync(sessionFile, "r");
     try {
-      const buffer = Buffer.alloc(256 * 1024);
+      const buffer = Buffer.allocUnsafe(256 * 1024);
       const read = readSync(fd, buffer, 0, buffer.length, 0);
       head = buffer.toString("utf8", 0, read);
     } finally {
@@ -55,16 +38,13 @@ function firstUserMessage(sessionFile: string): string | undefined {
     return undefined;
   }
   for (const line of head.split("\n")) {
-    if (!line.includes('"role":"user"')) continue;
+    if (!/"role"\s*:\s*"user"/.test(line)) continue;
     try {
-      const entry = JSON.parse(line) as { message?: { content?: unknown } };
+      const entry = JSON.parse(line);
+      if (entry.message?.role !== "user") continue;
       const content = entry.message?.content;
-      const text =
-        typeof content === "string"
-          ? content
-          : Array.isArray(content)
-            ? content.map((part) => (typeof part === "object" && part && "text" in part ? String((part as { text: unknown }).text) : "")).join(" ")
-            : "";
+      const text = typeof content === "string" ? content : Array.isArray(content)
+        ? content.map(part => typeof part?.text === "string" ? part.text : "").join(" ") : "";
       const first = text.split("\n").find((part) => part.trim().length > 0);
       const collapsed = first?.replace(/\s+/g, " ").trim();
       if (collapsed) return collapsed.length > 100 ? collapsed.slice(0, 100) + "…" : collapsed;
@@ -75,24 +55,16 @@ function firstUserMessage(sessionFile: string): string | undefined {
   return undefined;
 }
 
-/**
- * Turn a registry record into a panel row.
- *
- * The display name follows the same rule as `pi -r`: the session name if there is
- * one, else the first user message. A session that has not been used yet has
- * neither, and falls back to its directory.
- */
+/** Turn a registry record into a panel row. */
 export function rowFromRecord(record: RegistryRecord, host?: Pick<RegistryRecord, "pid" | "sessionFile">): SessionRow {
   const named = record.name?.trim();
   const fromFile = named ? undefined : record.sessionFile ? cachedFirstUserMessage(record.sessionFile) : undefined;
   return {
     key: `live:${record.pid}`,
     processIdentity: record.processIdentity,
-    exitControl: record.exitControl,
+    exitControl: record.exitControl && { ...record.exitControl },
     state: record.state,
     current: Boolean(host && (record.pid === host.pid || (host.sessionFile && record.sessionFile === host.sessionFile))),
-    // A session that has said nothing yet has no name and no first message. The
-    // directory it happens to run in is not its name, so say what it is instead.
     name: named || fromFile || "(new session)",
     cwd: record.cwd,
     updatedAt: record.updatedAt,
@@ -102,13 +74,7 @@ export function rowFromRecord(record: RegistryRecord, host?: Pick<RegistryRecord
   };
 }
 
-/**
- * Collapse records that point at the same session file.
- *
- * Two processes can hold one session file: reopening a closed session starts a new
- * pi on it while the old one is still alive. That is one session, so it gets one
- * row, and the most recently active process represents it.
- */
+/** Collapse records that point at the same session file. */
 export function dedupeLive(records: RegistryRecord[]): RegistryRecord[] {
   const byFile = new Map<string, RegistryRecord>();
   const loose: RegistryRecord[] = [];
@@ -123,16 +89,27 @@ export function dedupeLive(records: RegistryRecord[]): RegistryRecord[] {
   return [...byFile.values(), ...loose];
 }
 
-/**
- * Drop closed rows whose session is also running.
- *
- * The closed index is a scan of every session file on disk, which necessarily
- * includes the files of sessions that are running right now. Without this, a
- * session appears twice: once under Idle and once under Closed.
- */
+/** Drop closed rows whose session is also running. */
 export function withoutLiveDuplicates(closed: SessionRow[], live: SessionRow[]): SessionRow[] {
-  if (live.length === 0) return closed;
   const running = new Set(live.map((row) => row.sessionFile).filter((file): file is string => Boolean(file)));
   if (running.size === 0) return closed;
   return closed.filter((row) => !row.sessionFile || !running.has(row.sessionFile));
+}
+
+/** Poll live metadata once; drawing and editing consume the resulting snapshot. */
+export function createRowsSource(
+  readLive: () => RegistryRecord[], readClosed: () => SessionRow[] | undefined,
+  host?: Pick<RegistryRecord, "pid" | "sessionFile">,
+) {
+  let live: SessionRow[] = [], closed: SessionRow[] | undefined;
+  const source = { rows: [] as SessionRow[], version: 0, refresh() {
+    const nextLive = dedupeLive(readLive()).map(record => rowFromRecord(record, host));
+    const nextClosed = readClosed();
+    if (nextClosed === closed && sameRows(nextLive, live)) return;
+    live = nextLive;
+    closed = nextClosed;
+    source.rows = [...live, ...withoutLiveDuplicates(closed ?? [], live)];
+    source.version++;
+  } };
+  return source;
 }

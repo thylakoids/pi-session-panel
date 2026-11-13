@@ -1,23 +1,9 @@
-/**
- * The Sessions panel.
- *
- * One flat list, three stacked sections. Live rows come first because they are
- * the ones you act on; the closed section is long by nature and is the only
- * part that needs real scrolling.
- */
 import { decodeKittyPrintable, Input, isKeyRepeat, matchesKey, truncateToWidth as truncateGraphemes, visibleWidth, wrapTextWithAnsi, type KeyId } from "@earendil-works/pi-tui";
-import type { SessionRow, SessionState } from "./types.ts";
+import { sameRows, type SessionRow, type SessionState } from "./types.ts";
 import { formatAge, formatElapsed, shortCwd } from "./format.ts";
 import { matchSearch, parseSearch } from "./search.ts";
 
-/**
- * `truncateToWidth` costs about 7us because it segments graphemes. Most rows fit
- * their column, so measure first (0.5us) and only truncate when they do not.
- *
- * `keepTail` is pi-tui's "keep the end of the string", not "pad"; the caller pads
- * separately. When the text already fits there is nothing to truncate either way,
- * so the fast path is safe for both modes.
- */
+/** Avoid grapheme segmentation for text that already fits. */
 function truncateToWidth(text: string, width: number, ellipsis = "", keepTail = false): string {
   if (visibleWidth(text) <= width) return text;
   return truncateGraphemes(text, width, ellipsis, keepTail);
@@ -43,6 +29,8 @@ export interface PanelActions {
 
 export interface PanelOptions {
   rows(): SessionRow[];
+  /** Immutable sources can skip the full comparison until this revision changes. */
+  rowsVersion?(): number;
   actions: PanelActions;
   /** Called when an action means "you left the panel". */
   close(): void;
@@ -51,62 +39,14 @@ export interface PanelOptions {
 /** Gap between two help columns: wide enough that they read as separate. */
 const HELP_GAP = 4;
 
-type Section = "working" | "idle" | "closed";
+type Section = SessionState;
 const SECTIONS: Section[] = ["working", "idle", "closed"];
 
-const SECTION_TITLE: Record<Section, string> = {
-  working: "Working",
-  idle: "Idle",
-  closed: "Closed",
-};
-
-/** The resting and finished glyphs. Working rows animate instead. */
-const STATE_GLYPH: Record<Exclude<SessionState, "working">, string> = {
-  idle: "○",
-  closed: "·",
-};
-
-/**
- * The working glyph, following Claude Code 2.1.304.
- *
- * Its spinner module is six frames run ping-pong:
- *
- *   ["·","✢","✳","✶","✻","✽"] + reversed   →   12 frames
- *
- * with the index coming from `round(cosineEase(elapsed, 2000) * 5)` at a 100ms
- * tick. One out-and-back takes two seconds; because the cosine flattens at both
- * ends, the small and large glyphs linger while the middle flies past. That
- * easing, not the frame rate, is what makes it read as breathing.
- *
- * `·` is the closed end: the glyph genuinely disappears for a beat, which is the
- * "empty lungs" moment the earlier version was missing.
- */
+/** The working glyph, following Claude Code 2.1.304. */
 const SPINNER_FRAMES = ["·", "✢", "✳", "✶", "✻", "✽"] as const;
-const SPINNER_CYCLE: readonly string[] = [...SPINNER_FRAMES, ...[...SPINNER_FRAMES].reverse()];
-
-/** Claude Code's `Kn`: one out-and-back in two seconds. */
-const SPINNER_PERIOD_MS = 2000;
-
-/** Claude Code's `qLe`: the cosine easing shared by the spinner and the glow. */
-function cosineEase(elapsed: number, period: number): number {
-  return (1 - Math.cos((2 * Math.PI * elapsed) / period)) / 2;
-}
-
-/**
- * Claude Code's `Zn`: quantise the eased value onto the frame ladder.
- *
- * Every working row draws from this one clock. Claude Code has a single spinner
- * per conversation and no notion of several running at once, so a list where each
- * row breathes on its own phase has no counterpart there: it reads as several
- * unrelated animations instead of one panel with work in flight.
- */
 export function spinnerGlyphAt(elapsed: number): string {
-  return spinnerFrame(elapsed);
-}
-
-function spinnerFrame(elapsed: number): string {
-  const index = Math.round(cosineEase(elapsed, SPINNER_PERIOD_MS) * (SPINNER_FRAMES.length - 1));
-  return SPINNER_CYCLE[index % SPINNER_CYCLE.length]!;
+  const eased = (1 - Math.cos(2 * Math.PI * elapsed / 2000)) / 2;
+  return SPINNER_FRAMES[Math.round(eased * (SPINNER_FRAMES.length - 1))]!;
 }
 
 /** Age shown on the right of a row. Working counts to the second, the rest coarsely. */
@@ -116,27 +56,16 @@ function ageOf(row: SessionRow, at = Date.now()): string {
     : formatAge(row.updatedAt, at);
 }
 
-/**
- * pi -r's haystack for one row. Closed rows carry it already; a live row falls
- * back to what the panel knows, which is everything except the full message text.
- */
-function searchTextOf(row: SessionRow): string {
-  if (row.searchText) return row.searchText;
-  return `${row.sessionId ?? ""} ${row.name} ${row.cwd}`;
-}
-
 interface Node {
   kind: "header" | "row";
   section: Section;
   row?: SessionRow;
   id: string;
+  position: number;
+  index: number;
 }
 
-/**
- * Top border with a title on the left and info on the right:
- *   ╭─ Title ───────────────────── info ─╮
- * Both parts are measured in terminal columns, so a CJK title still fits.
- */
+/** Fit both labels inside the border in terminal columns. */
 function topBorder(title: string, info: string, width: number): string {
   if (width <= 0) return "";
   if (width === 1) return "╭";
@@ -145,8 +74,7 @@ function topBorder(title: string, info: string, width: number): string {
   const right = info ? ` ${info} ─` : "─";
   const fill = Math.max(0, inner - visibleWidth(left) - visibleWidth(right));
   const content = left + "─".repeat(fill) + right;
-  const clipped = truncateToWidth(content, inner);
-  return "╭" + clipped + " ".repeat(Math.max(0, inner - visibleWidth(clipped))) + "╮";
+  return "╭" + padEndVisible(truncateToWidth(content, inner), inner) + "╮";
 }
 
 /** Pad to a column count, not a code-unit count. */
@@ -154,12 +82,8 @@ function padEndVisible(text: string, width: number): string {
   return text + " ".repeat(Math.max(0, width - visibleWidth(text)));
 }
 
-function padStartVisible(text: string, width: number): string {
-  return " ".repeat(Math.max(0, width - visibleWidth(text))) + text;
-}
-
-function createInput(value = ""): Input {
-  const input = new Input({ prompt: "❯ " });
+function createInput(value = "", prompt = "❯ "): Input {
+  const input = new Input({ prompt });
   input.focused = true;
   input.setValue(value);
   input.handleInput("\x05"); // Start editing at the end using Input's public API.
@@ -197,10 +121,6 @@ function bindingMatches(data: string, key: PanelKey): boolean {
     matchesKey(data, keyId);
 }
 
-function commandMatches(command: PanelCommand, data: string): boolean {
-  return command.fallback === true || command.keys.some((key) => bindingMatches(data, key));
-}
-
 interface Confirmation {
   row: SessionRow;
 }
@@ -214,20 +134,11 @@ export class SessionsPanel {
   private confirmation: Confirmation | null = null;
   /** The rename draft and its caret, which the arrows move like any text field. */
   private rename: { row: SessionRow; input: Input; generation?: AbortController } | null = null;
-  /** The key list, toggled with ?. */
   private help = false;
   /** First visible row of the key list, for panels too short to show it all. */
   private helpScroll = 0;
   /** Whether the key list is taller than the panel, so the hint can say j/k scrolls. */
   private helpOverflow = false;
-  /**
-   * Bumped by anything the panel itself changes about a row.
-   *
-   * The data fingerprint samples rows, and a rename can change a name without
-   * changing any number it samples (two names of equal length, or a row past the
-   * sample window). A counter the panel controls makes those edits visible
-   * exactly, with no extra work per frame. See docs/adr/0012.
-   */
   private revision = 0;
   private windowStart = 0;
   private error: string | null = null;
@@ -237,115 +148,75 @@ export class SessionsPanel {
   private disposed = false;
   private pageSize = 10;
   private pasting = false;
-  private rowOrder = new Map<string, { state: SessionState; rank: number }>();
+  private sourceRows: SessionRow[] = [];
+  private sourceVersion: number | undefined;
+  private orderedRows: SessionRow[] = [];
+  private projection: { query: string; nodes: Node[]; rows: Node[]; byId: Map<string, Node>; groups: Map<Section, SessionRow[]> } | null = null;
+  private dataRevision = 0;
 
   constructor(options: PanelOptions) {
     this.options = options;
   }
 
-  /**
-   * Rows after the search filter, grouped into the three sections in order.
-   *
-   * The haystack and the matching rules are pi -r's, so the same query finds the
-   * same sessions in both places.
-   */
-  private grouped(): Map<Section, SessionRow[]> {
-    const rows = this.rowsForFrame();
-    const groups = new Map<Section, SessionRow[]>(SECTIONS.map((s) => [s, []]));
+  /** Rows after the search filter, grouped into the three sections in order. */
+  private view() {
+    if (this.projection?.query === this.query) return this.projection;
+    const groups = new Map<Section, SessionRow[]>(SECTIONS.map(s => [s, []]));
     const parsed = parseSearch(this.query);
-    if (parsed.error) return groups;
-    for (const row of rows) {
-      if (parsed.tokens.length > 0 || parsed.mode === "regex") {
-        if (!matchSearch(searchTextOf(row), parsed).matches) continue;
-      }
-      groups.get(row.state)!.push(row);
+    if (!parsed.error) for (const row of this.orderedRows) {
+      if (!this.query || matchSearch(row.searchText || [row.sessionId ?? "", row.name, row.cwd].join(" "), parsed).matches) groups.get(row.state)!.push(row);
     }
-    return groups;
-  }
-
-  /** The flat, selectable projection of the grouped rows. */
-  nodes(): Node[] {
-    const groups = this.grouped();
     const nodes: Node[] = [];
+    const rows: Node[] = [];
     for (const section of SECTIONS) {
-      const rows = groups.get(section)!;
-      if (rows.length === 0) continue;
-      nodes.push({ kind: "header", section, id: `header:${section}` });
-      for (const row of rows) nodes.push({ kind: "row", section, row, id: row.key });
+      if (groups.get(section)!.length) nodes.push({ kind: "header", section, id: "header:" + section, position: nodes.length, index: -1 });
+      for (const row of groups.get(section)!) {
+        const node: Node = { kind: "row", section, row, id: row.key, position: nodes.length, index: rows.length };
+        nodes.push(node);
+        rows.push(node);
+      }
     }
-    return nodes;
+    return this.projection = { query: this.query, nodes, rows, byId: new Map(nodes.map(n => [n.id, n])), groups };
   }
 
-  private selectable(): Node[] {
-    return this.nodes().filter((n) => n.kind === "row");
-  }
+  nodes(): Node[] { return this.view().nodes; }
+  private selectable(): Node[] { return this.view().rows; }
+  private selectedRow(): SessionRow | null { return this.view().byId.get(this.selected ?? "")?.row ?? null; }
 
-  private selectedRow(): SessionRow | null {
-    const node = this.nodes().find((n) => n.id === this.selected);
-    return node?.row ?? null;
-  }
-
-  /**
-   * Keep a selection that still exists; otherwise land on the row that took the
-   * old one's place.
-   *
-   * Falling back to the first row teleported the user to the top of the list when
-   * a row moved between sections (exit an idle session and it becomes closed) or
-   * was deleted. Remembering the index keeps the eye where it was.
-   */
+  /** Keep selection stable; a removed row yields to its nearest neighbour. */
   private clampSelection(): void {
-    const rows = this.selectable();
-    if (this.selected === null && !this.query) this.selected = rows.find(node => node.row?.current)?.id ?? null;
-    const selectedIndex = rows.findIndex((n) => n.id === this.selected);
-    if (selectedIndex >= 0) {
-      this.selectedIndex = selectedIndex;
-      return;
-    }
-    const at = Math.max(0, Math.min(this.selectedIndex, rows.length - 1));
-    this.selected = rows[at]?.id ?? null;
-    if (rows.length === 0) this.windowStart = 0;
+    const { rows, byId } = this.view();
+    const node = byId.get(this.selected ?? "") ?? (this.selected === null && !this.query ? rows.find(n => n.row?.current) : undefined);
+    this.select(node?.index ?? this.selectedIndex);
+    if (!rows.length) this.windowStart = 0;
   }
 
-  /** The index the selection had last frame, so a lost selection can be re-anchored. */
   private selectedIndex = 0;
 
-  /** Recompute the remembered index from the current row set. */
-  private rememberSelection(): void {
-    const at = this.selectable().findIndex((n) => n.id === this.selected);
-    if (at >= 0) this.selectedIndex = at;
+  private select(index: number): void {
+    const rows = this.selectable();
+    this.selectedIndex = Math.max(0, Math.min(rows.length - 1, index));
+    this.selected = rows[this.selectedIndex]?.id ?? null;
   }
 
-  private move(delta: number): void {
-    const rows = this.selectable();
-    const index = rows.findIndex((n) => n.id === this.selected);
-    const next = Math.max(0, Math.min(rows.length - 1, (index < 0 ? 0 : index) + delta));
-    this.selected = rows[next]?.id ?? null;
-    this.rememberSelection();
-  }
-
-  private jumpToEdge(edge: "first" | "last"): void {
-    const rows = this.selectable();
-    this.selected = (edge === "first" ? rows[0] : rows[rows.length - 1])?.id ?? null;
-    this.rememberSelection();
-  }
+  private move(delta: number): void { this.select(this.selectedIndex + delta); }
+  private jumpToEdge(edge: "first" | "last"): void { this.select(edge === "first" ? 0 : this.selectable().length - 1); }
 
   private page(direction: -1 | 1): void {
     const nodes = this.nodes();
-    const rows = nodes.map((node, position) => ({ node, position })).filter(({ node }) => node.kind === "row");
+    const rows = this.selectable();
     if (!rows.length) return;
-    const current = nodes.findIndex((node) => node.id === this.selected);
+    const current = this.view().byId.get(this.selected ?? "")?.position ?? 0;
     const target = current + direction * this.pageSize;
-    const next = direction > 0
-      ? rows.find(({ position }) => position >= target) ?? rows.at(-1)!
-      : rows.findLast(({ position }) => position <= target) ?? rows[0]!;
-    this.selected = next.node.id;
+    const index = direction > 0 ? rows.findIndex(n => n.position >= target) : rows.findLastIndex(n => n.position <= target);
+    this.select(index < 0 ? (direction > 0 ? rows.length - 1 : 0) : index);
     this.windowStart = Math.max(0, Math.min(this.windowStart + direction * this.pageSize, nodes.length - this.pageSize));
-    this.rememberSelection();
   }
 
   private async open(row: SessionRow): Promise<void> {
-    if (await this.act(() => (row.state === "closed" ? this.options.actions.reopen(row) : this.options.actions.focus(row)))) {
+    if (await this.attempt(() => (row.state === "closed" ? this.options.actions.reopen(row) : this.options.actions.focus(row)))) {
       this.searching = false;
+      this.options.close();
     }
   }
 
@@ -353,32 +224,19 @@ export class SessionsPanel {
   private async pressX(): Promise<void> {
     const row = this.selectedRow();
     if (!row) return;
-    this.error = null;
-    try {
+    await this.attempt(async () => {
       if (row.state === "working") await this.options.actions.interrupt(row);
-      else if (row.state === "idle") {
-        await this.options.actions.exit(row);
-        this.revision++;
-      } else this.confirmation = { row };
-    } catch (error) {
-      this.error = error instanceof Error ? error.message : String(error);
-    }
+      else if (row.state === "idle") await this.options.actions.exit(row);
+      else this.confirmation = { row };
+    });
   }
 
   private async confirm(choice: boolean): Promise<void> {
     const pending = this.confirmation;
     this.confirmation = null;
-    if (!pending || !choice) return;
-    try {
-      await this.options.actions.remove(pending.row);
-      // The row is gone; let clampSelection land on its neighbour rather than the
-      // top of the list.
-      this.revision++;
-      this.frameRows = null;
-      this.clampSelection();
-    } catch (error) {
-      this.error = error instanceof Error ? error.message : String(error);
-    }
+    if (pending && choice) await this.attempt(() => this.options.actions.remove(pending.row));
+    this.refreshRows();
+    this.clampSelection();
   }
 
   /** One registry drives dispatch, help and mode-specific footer hints. */
@@ -445,8 +303,7 @@ export class SessionsPanel {
       ] : []),
       command(["/"], "search", () => { this.searching = true; this.searchInput = createInput(this.query); }, 50),
       command(["R"], "rescan closed", async () => {
-        try { await this.options.actions.rescan(); }
-        catch (error) { this.error = error instanceof Error ? error.message : String(error); }
+        await this.attempt(() => this.options.actions.rescan());
       }, false),
       command(["?"], "keys", () => { this.help = true; this.helpScroll = 0; }, 20),
       ...(this.query ? [command(["escape"], "clear filter", clearSearch, 10)] : []),
@@ -456,14 +313,8 @@ export class SessionsPanel {
     ];
   }
 
-  /** One hint: dim key, muted action. */
   private keyHint(theme: any, key: string, action: string): string {
     return theme.fg("dim", key) + theme.fg("muted", " " + action);
-  }
-
-  /** Hints joined the way pi joins its own. */
-  private hints(theme: any, parts: [string, string][]): string {
-    return parts.map(([key, action]) => this.keyHint(theme, key, action)).join(theme.fg("muted", " · "));
   }
 
   private hint(theme: any, width: number): string {
@@ -475,44 +326,37 @@ export class SessionsPanel {
       const separator = width >= action.length + 13 ? " · " : "  ";
       return truncateToWidth(theme.fg("error", action) + theme.fg("muted", separator) + this.keyHint(theme, "esc", "cancel"), width);
     }
-    const parts: [string, string][] = [];
-    const commands = this.commands().filter((command) => command.footer)
+    const parts: string[] = [];
+    const separator = theme.fg("muted", " · ");
+    let used = 0;
+    const commands = this.commands().filter(command => command.footer)
       .sort((a, b) => (typeof a.footer === "number" ? a.footer : 50) - (typeof b.footer === "number" ? b.footer : 50));
     for (const command of commands) {
-      const part: [string, string] = [commandKey(command, true), command.action];
-      if (visibleWidth(this.hints(theme, [...parts, part])) <= width) parts.push(part);
-      else if (command.keys.length > 1) {
-        part[0] = KEY_LABELS[command.keys[0]!] ?? command.keys[0]!;
-        if (visibleWidth(this.hints(theme, [...parts, part])) <= width) parts.push(part);
+      const gap = parts.length ? 3 : 0;
+      let part = this.keyHint(theme, commandKey(command, true), command.action);
+      if (used + gap + visibleWidth(part) > width && command.keys.length > 1) {
+        part = this.keyHint(theme, KEY_LABELS[command.keys[0]!] ?? command.keys[0]!, command.action);
       }
+      const size = visibleWidth(part);
+      if (used + gap + size <= width) { parts.push(part); used += gap + size; }
     }
-    return this.hints(theme, parts);
+    return parts.join(separator);
   }
 
-  /**
-   * The help screen: one key column, one action column, wrapped into as many
-   * columns as the panel can carry.
-   *
-   * The column count is what makes the list fit a short panel instead of being
-   * cut off, and `helpScroll` covers the case where even that is not enough: a
-   * panel eight rows tall cannot show ten entries side by side, so the list
-   * scrolls instead of lying about how many keys exist.
-   */
+  /** Fit help into columns, then scroll if the terminal is still too short. */
   private helpBody(theme: any, inner: number, rows: number): string[] {
     const keys = this.commands(false).map((command): [string, string] => [commandKey(command), command.action]);
     const keyWidth = Math.max(...keys.map(([k]) => visibleWidth(k))) + 2;
     const cell = (key: string, action: string) =>
       theme.fg("dim", padEndVisible(key, keyWidth)) + theme.fg("muted", action);
 
-    // Each column is the key column plus its widest action, plus a gap wide
-    // enough that two adjacent cells do not read as one run-on line.
+    // Separate columns by their widest cell plus a fixed gap.
     const widest = Math.max(...keys.map(([k, a]) => keyWidth + visibleWidth(a))) + HELP_GAP;
     const byWidth = Math.max(1, Math.floor(inner / widest));
     const byHeight = Math.ceil(keys.length / Math.max(1, rows));
     const columns = Math.max(1, Math.min(byHeight, byWidth));
     const perColumn = Math.ceil(keys.length / columns);
 
-    // Never scroll past the end: a short last page would look like a bug.
     const maxScroll = Math.max(0, perColumn - rows);
     this.helpScroll = Math.max(0, Math.min(this.helpScroll, maxScroll));
     this.helpOverflow = maxScroll > 0;
@@ -534,16 +378,7 @@ export class SessionsPanel {
     const { row, input } = this.rename!;
     const next = input.getValue().trim();
     if (!next) { this.error = "A session needs a name."; return; }
-    try {
-      if (next !== row.name) {
-        await this.options.actions.rename(row, next);
-        this.revision++;
-      }
-      this.rename = null;
-      this.error = null;
-    } catch (error) {
-      this.error = error instanceof Error ? error.message : String(error);
-    }
+    if (await this.attempt(() => next === row.name ? undefined : this.options.actions.rename(row, next))) this.rename = null;
   }
 
   private async generateRename(): Promise<void> {
@@ -588,7 +423,9 @@ export class SessionsPanel {
     if (this.busy || this.disposed) return;
     if (!this.rename && !this.searching && bindingMatches(data, "x") && isKeyRepeat(data)) return;
     if (this.rename?.generation && !matchesKey(data, "escape")) return;
-    this.frameRows = null;
+    const editing = this.rename;
+    this.refreshRows();
+    if (editing && !this.rename) return;
     if (this.confirmation) {
       if (isKeyRepeat(data)) return;
       const target = this.confirmation.row;
@@ -617,173 +454,92 @@ export class SessionsPanel {
       this.gTimer = null;
     }
     if (!this.help && !this.rename && !this.searching) {
-      this.error = null;
+      if (this.error) { this.error = null; this.revision++; }
       this.clampSelection();
     }
-    const command = this.commands().find((command) => commandMatches(command, data));
+    const command = this.commands().find((command) => command.fallback || command.keys.some(key => bindingMatches(data, key)));
     if (command) {
+      this.revision++;
       const pending = command.run(data);
       if (pending) {
         this.busy = command.action;
         try { await pending; }
-        finally { this.busy = null; this.frameRows = null; }
+        finally { this.busy = null; this.refreshRows(); }
       }
     } else if (this.rename || this.searching) this.editInput(data);
   }
 
-  /** Whether a text field or modal view is active. */
-  isEditingText(): boolean {
-    return this.searching || this.rename !== null || this.help || this.confirmation !== null;
+  isEditingText(): boolean { return this.searching || this.rename !== null || this.help || this.confirmation !== null; }
+
+  selectedKey(): string | null { return this.selected; }
+
+  errorText(): string | null { return this.error; }
+
+  private async attempt(run: () => void | Promise<void>): Promise<boolean> {
+    this.error = null;
+    try { await run(); return true; }
+    catch (error) { this.error = error instanceof Error ? error.message : String(error); return false; }
+    finally { this.revision++; }
   }
 
-  /** The selected row key, for tests. */
-  selectedKey(): string | null {
-    return this.selected;
-  }
+  private frameCache: { key: string; theme: unknown; lines: string[] } | null = null;
 
-  /** The message the panel is showing, for tests. */
-  errorText(): string | null {
-    return this.error;
-  }
-
-  private async act(run: () => void | Promise<void>): Promise<boolean> {
-    try {
-      await run();
-      this.options.close();
-      return true;
-    } catch (error) {
-      this.error = error instanceof Error ? error.message : String(error);
-      return false;
+  /** Snapshot all fields, including action credentials; callers may mutate their rows. */
+  private refreshRows(): void {
+    const version = this.options.rowsVersion?.();
+    if (version !== undefined && version === this.sourceVersion) return;
+    const rows = this.options.rows();
+    this.sourceVersion = version;
+    if (sameRows(rows, this.sourceRows)) return;
+    const ranks = new Map(this.orderedRows.map((row, rank) => [row.key, { state: row.state, rank }]));
+    this.sourceRows = rows.map(row => ({ ...row, exitControl: row.exitControl && { ...row.exitControl } }));
+    const rank = (row: SessionRow) => ranks.get(row.key)?.state === row.state ? ranks.get(row.key)!.rank : Infinity;
+    this.orderedRows = [...this.sourceRows].sort((a, b) => SECTIONS.indexOf(a.state) - SECTIONS.indexOf(b.state) || (a.state === "closed" ? 0 : rank(a) - rank(b)));
+    if (this.rename) {
+      const target = this.sourceRows.find(row => this.rename!.row.sessionFile
+        ? row.sessionFile === this.rename!.row.sessionFile : row.key === this.rename!.row.key);
+      if (target) { this.rename.row = target; this.selected = target.key; }
+      else { this.rename.generation?.abort(); this.rename = null; this.error = "This session is no longer in the list."; }
     }
+    this.projection = null;
+    this.dataRevision++;
+    this.revision++;
   }
 
-  /**
-   * Cached frame. A panel is redrawn on a tick even when nothing about it moved,
-   * so the last result is reused until one of these actually changes.
-   */
-  private frameCache: { key: string; lines: string[] } | null = null;
-
-  /** Rows read for the current frame; cleared whenever a frame is rebuilt. */
-  private frameRows: SessionRow[] | null = null;
-
-  /**
-   * Everything that can change the rendered lines. Cheap on purpose: a tick that
-   * changes nothing must cost microseconds, so this is all integers and a few
-   * short strings, never a formatted row.
-   */
   private frameKey(theme: any, width: number, height: number, at: number): string {
-    return [
-      width,
-      height,
-      theme?.name ?? "",
-      theme?.appearance ?? "",
-      this.selected ?? "",
-      this.query,
-      this.searching ? 1 : 0,
-      this.help ? 1 : 0,
-      this.helpScroll,
-      this.revision, // Also covers Input's private caret and undo state.
-      this.rename ? `${this.rename.row.key}:${this.rename.input.getValue()}` : "",
-      this.confirmation ? `${this.confirmation.row.key}` : "",
-      this.error ?? "",
-      this.busy ?? "",
-      this.windowStart,
-      // Every working row shares one clock, so one glyph covers all of them.
-      // Reading the clock here, rather than the row set, is what lets the cache
-      // hold a frame still while nothing moves.
-      this.workingGlyphs(at),
-      // Ages change at most once a second, so a second is the granularity.
-      Math.floor(at / 1000),
-      this.dataSignature(),
-    ].join("\u0000");
+    const browsing = !this.help && !this.rename;
+    const working = browsing && this.nodes().slice(this.windowStart, this.windowStart + this.pageSize).some(n => n.row?.state === "working");
+    return [width, height, theme?.name, theme?.appearance, this.revision,
+      browsing ? Math.floor(at / 1000) : "", working ? spinnerGlyphAt(at) : ""].join("\0");
   }
 
-  /**
-   * The glyph the working rows draw right now, or "" when nothing is working.
-   *
-   * One glyph for the whole section: the rows are in step, so there is nothing
-   * per-row to report. Returning "" when idle keeps the key stable while the
-   * panel sits there, which is what the frame cache needs to stay a hit.
-   */
-  private workingGlyphs(at: number): string {
-    const anyWorking = this.rowsForFrame().some((row) => row.state === "working");
-    return anyWorking ? spinnerFrame(at) : "";
-  }
-
-  /**
-   * Rows are rebuilt by the host on every call, which is not free (live rows read
-   * their session file). One read per frame is enough, so it is memoised and
-   * shared by the key and the renderer.
-   */
-  private rowsForFrame(): SessionRow[] {
-    if (!this.frameRows) {
-      const rank = (row: SessionRow): number => {
-        const previous = this.rowOrder.get(row.key);
-        return previous?.state === row.state ? previous.rank : Number.MAX_SAFE_INTEGER;
-      };
-      this.frameRows = [...this.options.rows()].sort((a, b) => SECTIONS.indexOf(a.state) - SECTIONS.indexOf(b.state) || rank(a) - rank(b));
-      this.rowOrder = new Map(this.frameRows.map((row, rank) => [row.key, { state: row.state, rank }]));
-    }
-    return this.frameRows;
-  }
-
-  /**
-   * Arithmetic fingerprint of the rows, so data changes invalidate the cache.
-   *
-   * The closed section is append-only and ordered by age, so its head is where
-   * change shows up first; sampling the first few hundred rows catches a new or
-   * removed session without walking all of them every frame.
-   */
-  private dataSignature(): number {
-    const rows = this.rowsForFrame();
-    const limit = Math.min(rows.length, 300);
-    let hash = rows.length;
-    for (let i = 0; i < limit; i++) {
-      const row = rows[i]!;
-      hash = (Math.imul(hash, 31) + row.updatedAt + row.state.length + row.name.length + (row.workingSince ?? 0) + Number(Boolean(row.current))) | 0;
-    }
-    return hash;
-  }
+  invalidate(): void { this.frameCache = null; }
 
   render(theme: any, width: number, height: number): string[] {
     const at = Date.now();
-    this.frameRows = null;
+    this.refreshRows();
     this.innerWidth = Math.max(1, width - 4);
     this.pageSize = this.bodyBudget(height, this.innerWidth).budget;
-    // Everything the key depends on is settled first. windowStart used to be
-    // written inside renderFrame, after the key was taken, so the stored key
-    // described the previous scroll position and every scroll cost a second,
-    // wasted rebuild. See docs/adr/0012.
+    // Settle selection and scroll before caching the frame.
     this.clampSelection();
     this.scrollIntoView(height);
     const key = this.frameKey(theme, width, height, at);
-    if (this.frameCache?.key === key) return this.frameCache.lines;
+    if (this.frameCache?.key === key && this.frameCache.theme === theme) return this.frameCache.lines;
     const lines = this.renderFrame(theme, width, height, at);
-    this.frameCache = { key, lines };
+    this.frameCache = { key, theme, lines };
     return lines;
   }
 
-  /**
-   * How many body lines fit, and the wrapped error lines that eat into them.
-   *
-   * Two lines are the frame's top and bottom, one is the blank line under the top
-   * border, one is the hint row. Every row and header is exactly one line, so the
-   * budget is arithmetic.
-   */
+  /** How many body lines fit, and the wrapped error lines that eat into them. */
   private bodyBudget(height: number, inner: number): { budget: number; errorLines: string[] } {
     const errorLines = this.error ? wrapTextWithAnsi(this.error, inner).slice(0, 2) : [];
     return { budget: Math.max(1, height - 5 - errorLines.length - (this.searching ? 1 : 0)), errorLines };
   }
 
-  /**
-   * The first visible line, chosen so the selection is on screen.
-   *
-   * Runs before the frame key, so a scroll is part of the frame it describes.
-   */
   private scrollIntoView(height: number): void {
     const nodes = this.nodes();
     const { budget } = this.bodyBudget(height, this.innerWidth);
-    const found = nodes.findIndex((n) => n.id === this.selected);
+    const found = this.view().byId.get(this.selected ?? "")?.position ?? -1;
     if (found >= 0) {
       if (found < this.windowStart) this.windowStart = found;
       else if (found >= this.windowStart + budget) this.windowStart = found - budget + 1;
@@ -791,14 +547,15 @@ export class SessionsPanel {
     this.windowStart = Math.max(0, Math.min(this.windowStart, Math.max(0, nodes.length - budget)));
   }
 
-  /** Width last passed to render, so scrollIntoView can wrap the error line. */
   private innerWidth = 76;
+
+  private columns: { key: string; folderWidth: number; ageWidth: number } | null = null;
 
   private renderFrame(theme: any, width: number, height: number, at: number): string[] {
     const inner = Math.max(1, width - 4);
     const border = (s: string) => theme.fg("borderMuted", s);
     const total = this.nodes().length;
-    const groups = this.grouped();
+    const groups = this.view().groups;
     const liveCount = groups.get("working")!.length + groups.get("idle")!.length;
     const info = `${liveCount} live · ${groups.get("closed")!.length} closed`;
 
@@ -808,7 +565,7 @@ export class SessionsPanel {
       ? "Keys"
       : this.rename
         ? "Rename session"
-        : this.searching
+      : this.searching
           ? "Search"
           : this.query
             ? `Sessions — filter: ${this.query}`
@@ -829,36 +586,38 @@ export class SessionsPanel {
     } else {
       if (this.searching) body.push(this.searchInput.render(inner)[0]!);
       const nodes = this.nodes();
-      const sample = nodes.filter((n) => n.kind === "row").slice(0, 200).map((n) => n.row!);
-      const folderWidth = inner >= 68 ? Math.min(
-        Math.max(0, ...sample.map((r) => visibleWidth(shortCwd(r.cwd)))),
-        Math.max(4, Math.floor(inner * 0.32)),
-      ) : 0;
-      const ageWidth = inner >= 52 ? Math.min(
-        Math.max(0, ...sample.map((r) => visibleWidth(ageOf(r, at)))),
-        Math.max(3, Math.floor(inner * 0.14)),
-      ) : 0;
-      const rightWidth = sample.length && ageWidth ? ageWidth + 1 + (folderWidth ? folderWidth + 2 : 0) : 0;
+      const columnKey = [inner, this.dataRevision, this.query, Math.floor(at / 1000)].join("\0");
+      if (this.columns?.key !== columnKey) {
+        const sample = this.selectable().slice(0, 200).map(n => n.row!);
+        this.columns = {
+          key: columnKey,
+          folderWidth: inner >= 68 ? Math.min(Math.max(0, ...sample.map(r => visibleWidth(shortCwd(r.cwd)))), Math.max(4, Math.floor(inner * 0.32))) : 0,
+          ageWidth: inner >= 52 ? Math.min(Math.max(0, ...sample.map(r => visibleWidth(ageOf(r, at)))), Math.max(3, Math.floor(inner * 0.14))) : 0,
+        };
+      }
+      const { folderWidth, ageWidth } = this.columns;
+      const rightWidth = this.selectable().length && ageWidth ? ageWidth + 1 + (folderWidth ? folderWidth + 2 : 0) : 0;
 
       const rows = nodes.slice(this.windowStart, this.windowStart + budget);
       for (const node of rows) {
         if (node.kind === "header") {
-          body.push(theme.fg("muted", truncateToWidth(` ${SECTION_TITLE[node.section]}`, inner)));
+          const title = node.section[0]!.toUpperCase() + node.section.slice(1);
+          body.push(theme.fg("muted", truncateToWidth(" " + title, inner)));
           continue;
         }
         const row = node.row!;
         const isSelected = node.id === this.selected;
         const folder = truncateToWidth(shortCwd(row.cwd), folderWidth, "…");
-        const age = truncateToWidth(ageOf(row, at), ageWidth, "…");
-        const right = rightWidth ? (folderWidth ? padEndVisible(folder, folderWidth) + "  " : "") + padStartVisible(age, ageWidth) + " " : "";
-        const glyph = row.state === "working" ? spinnerFrame(at) : STATE_GLYPH[row.state];
-        // Routine states stay neutral; glyphs and section labels convey status.
+        const age = truncateToWidth(ageOf(row, at), ageWidth, "…"); // Age labels use one column per code unit.
+        const right = rightWidth ? (folderWidth ? padEndVisible(folder, folderWidth) + "  " : "") + age.padStart(ageWidth) + " " : "";
+        const glyph = row.state === "working" ? spinnerGlyphAt(at) : row.state === "idle" ? "○" : "·";
         const styledGlyph = theme.fg("muted", glyph);
+        const leftWidth = Math.max(1, inner - rightWidth - (rightWidth ? 2 : 0));
         const name = row.current ? theme.bold(row.name) : row.name;
         const left = isSelected
           ? `❯ ${glyph} ${name}`
           : `  ${styledGlyph} ${theme.fg(row.state === "closed" && !row.current ? "muted" : "text", name)}`;
-        const clippedLeft = truncateToWidth(left, Math.max(1, inner - rightWidth - (rightWidth ? 2 : 0)), "…");
+        const clippedLeft = truncateToWidth(left, leftWidth, "…");
         const line = clippedLeft
           + " ".repeat(Math.max(0, inner - visibleWidth(clippedLeft) - rightWidth))
           + (isSelected ? right : theme.fg("dim", right));
@@ -870,8 +629,7 @@ export class SessionsPanel {
 
     body.push(...errorLines.map((s) => theme.fg("error", s)));
 
-    // Never pad past the budget: a wrapped path in the confirmation screen used to
-    // push the frame past the overlay's max height.
+    // Wrapped paths and errors must stay within the overlay height.
     if (body.length > Math.max(1, height - 5)) body = body.slice(0, Math.max(1, height - 5));
     while (body.length < Math.max(1, height - 5)) body.push("");
 
@@ -898,17 +656,10 @@ export class SessionsPanel {
     return "No sessions.";
   }
 
-  /**
-   * Whether a redraw right now would change anything.
-   *
-   * The spinner steps every ~167ms, but the host polls faster than that. Asking
-   * the real frame key is exact: it also catches a second rolling over, the data
-   * changing, or a selection moving, none of which a glyph comparison would see.
-   */
   needsRedraw(theme: any, width: number, height: number): boolean {
-    this.frameRows = null;
+    this.refreshRows();
     this.clampSelection();
-    return this.frameKey(theme, width, height, Date.now()) !== this.frameCache?.key;
+    return this.frameCache?.theme !== theme || this.frameKey(theme, width, height, Date.now()) !== this.frameCache?.key;
   }
 
   dispose(): void {

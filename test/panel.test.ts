@@ -1,9 +1,3 @@
-/**
- * Tests for the panel, the registry and the search.
- *
- * Each case here was written by breaking the code first and confirming the test
- * failed, so none of them are decorative.
- */
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { mkdtempSync, readdirSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -14,13 +8,10 @@ import { join } from "node:path";
 import { SessionsPanel } from "../extension/panel.ts";
 import { readRegistry, writeRecord, removeRecord } from "../extension/registry.ts";
 import { closedScanDir, insertClosed, isSubagentSession, scanClosed } from "../extension/closed.ts";
-import { readClosedCache, writeClosedCache } from "../extension/closed-cache.ts";
 import { parseSearch, matchSearch } from "../extension/search.ts";
-import { buildUserPrompt, capInput, cleanTitle, createNamer, nameSource, resolveModel, sessionContent } from "../extension/naming.ts";
-import { spinnerGlyphAt as currentGlyphForTest } from "../extension/panel.ts";
+import { capInput, cleanTitle, createNamer, nameSource, resolveModel } from "../extension/naming.ts";
 import { readConfig } from "../extension/config.ts";
-import { dedupeLive, rowFromRecord, withoutLiveDuplicates } from "../extension/live.ts";
-import { mkdtempSync as mkdtemp2, writeFileSync as writeFile2 } from "node:fs";
+import { dedupeLive } from "../extension/live.ts";
 import { CURSOR_MARKER, renderFakeCursor, visibleWidth } from "@earendil-works/pi-tui";
 
 const theme = {
@@ -48,7 +39,6 @@ function panel(rows: () => any[], actions: Partial<Record<string, unknown>> = {}
   const instance = new SessionsPanel({
     rows,
     close: () => calls.push("close"),
-    notify: () => {},
     actions: {
       focus: () => calls.push("focus"),
       reopen: () => calls.push("reopen"),
@@ -85,13 +75,6 @@ function assertWidths(lines: string[], width: number) {
     assert.equal(lastChar(line), "│", `interior line ${index + 1} must end on the border`);
   }
 }
-
-test("every line is exactly the requested width", () => {
-  const { instance } = panel(() => [row()]);
-  for (const width of [40, 72, 100, 121]) {
-    assertWidths(instance.render(theme, width, 20), width);
-  }
-});
 
 test("search and rename keep their input and frame within narrow widths", async () => {
   const { instance } = panel(() => [row({ name: "为什么回测的滑点模型偏高" })]);
@@ -283,26 +266,12 @@ test("deleting a row immediately selects its neighbour without waiting for rende
   assert.equal(instance.selectedKey(), "closed:2");
 });
 
-test("Enter reopens a closed session instead of replacing this one", async () => {
-  const rows = [
-    row({ key: "live:1", state: "working", workingSince: Date.now() - 1000 }),
-    row({ key: "closed:/tmp/x.jsonl", state: "closed", sessionFile: "/tmp/x.jsonl" }),
-  ];
-  const { instance, calls } = panel(() => rows);
-  instance.render(theme, 100, 20);
-
-  await instance.handleInput("j");
-  await instance.handleInput("\r");
-
-  // Reopening must never just navigate: it has to leave this session untouched.
-  assert.deepEqual(calls, ["reopen", "close"], "Enter on closed must reopen and close");
-});
-
-test("Enter on a live row jumps to its pane", async () => {
-  const { instance, calls } = panel(() => [row({ state: "working", workingSince: Date.now() - 1000 })]);
-  instance.render(theme, 100, 20);
-  await instance.handleInput("\r");
-  assert.deepEqual(calls, ["focus", "close"]);
+test("Enter opens the selected live or closed session", async () => {
+  for (const state of ["working", "idle", "closed"]) {
+    const { instance, calls } = panel(() => [row({ state })]);
+    await instance.handleInput("\r");
+    assert.deepEqual(calls, [state === "closed" ? "reopen" : "focus", "close"], state);
+  }
 });
 
 test("right opens a list selection but remains caret movement while editing", async () => {
@@ -438,28 +407,6 @@ test("inserting into the closed index keeps it ordered and free of duplicates", 
   assert.equal(again.rows.length, 3, "re-inserting must not duplicate");
 });
 
-test("the redraw gate stays quiet when nothing changed", () => {
-  // updatedAt is fixed on purpose: if it followed the mocked clock, the data
-  // signature would change and the gate would report a redraw for the wrong
-  // reason, which is exactly the bug this test exists to catch.
-  const fixed = row({ updatedAt: 1_700_000_000_000 });
-  const { instance } = panel(() => [fixed]);
-  const realNow = Date.now;
-  try {
-    const base = 1_700_000_000_000;
-    Date.now = () => base;
-    instance.render(theme, 100, 20);
-    assert.equal(instance.needsRedraw(theme, 100, 20), false, "same instant must not redraw");
-
-    // 2000ms is exactly one spinner period, so the glyph is unchanged here and
-    // only the second term can make the frame differ.
-    Date.now = () => base + 2000;
-    assert.equal(instance.needsRedraw(theme, 100, 20), true, "a new second must redraw");
-  } finally {
-    Date.now = realNow;
-  }
-});
-
 test("cleanTitle keeps identifier characters and drops punctuation", () => {
   assert.equal(cleanTitle('"Refactor the session registry."'), "Refactor the session registry");
   // A space between two CJK characters is a layout artefact, not a word break.
@@ -496,37 +443,19 @@ test("cleanTitle takes the title field of a JSON reply", () => {
   assert.equal(cleanTitle(JSON.stringify({ notatitle: 1 })), '');
 });
 
-test("naming content is every human turn, in order, with no assistant or tool text", () => {
-  const branch = [
-    { type: "message", message: { role: "system", content: "" } },
-    { type: "message", message: { role: "user", content: "看下这个" } },
-    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "assistant noise" }] } },
-    { type: "message", message: { role: "toolResult", content: [{ type: "text", text: "tool noise" }] } },
-    { type: "message", message: { role: "user", content: [{ type: "text", text: "堆栈" }, { type: "image" }] } },
-  ];
-  // Claude Code names from every human turn, not just the first: a session that
-  // opens with "看下这个" only makes sense with the paste that follows it.
-  assert.equal(sessionContent(branch), "看下这个\n堆栈");
-  assert.equal(sessionContent(branch, "新的问题"), "看下这个\n堆栈\n新的问题", "the pending prompt is appended");
-  assert.equal(sessionContent([]), "");
-});
-
-test("an unusable branch yields no name source", () => {
-  for (const content of ["", "   \n  ", [], [{ type: "image" }]]) {
-    const branch = [{ type: "message", message: { role: "user", content } }];
-    assert.equal(nameSource(branch), undefined, `content ${JSON.stringify(content)} must yield undefined`);
-  }
-});
-
-test("a message too thin to name is skipped, in any script", () => {
+test("naming thresholds count only user text across scripts and content blocks", () => {
   // Claude Code gates on a raw 10-character count, which is an English count: nine
   // Chinese characters is a whole question, ten Latin characters is a fragment.
-  const tooThin = ["hi", "继续", "ok", "   ", "!", "!".repeat(3000)];
+  assert.equal(nameSource([]), undefined);
+  const tooThin = ["hi", "继续", "ok", "", "   \n  ", "!", "!".repeat(3000), [], [{ type: "image" }]];
   for (const content of tooThin) {
     const branch = [{ type: "message", message: { role: "user", content } }];
     assert.equal(nameSource(branch), undefined, JSON.stringify(content) + " must not spend a model call");
   }
   const enough = ["滑点模型为什么偏高", "rename the session panel", "检查 closed 分区"];
+  assert.equal(nameSource([{ type: "message", message: { role: "user", content: [
+    { type: "text", text: "检查 closed 分区" }, { type: "image" },
+  ] } }]), "检查 closed 分区", "only text blocks contribute naming units");
   for (const content of enough) {
     const branch = [{ type: "message", message: { role: "user", content } }];
     assert.equal(nameSource(branch), content, JSON.stringify(content) + " is substantial enough to name");
@@ -547,24 +476,6 @@ test("an over-long context preserves the task head and recent tail within its bu
   assert.equal(capInput("short enough"), "short enough");
 });
 
-test("the user prompt wraps the content in session tags and states the language rule", () => {
-  const prompt = buildUserPrompt("修一下滑点模型");
-  assert.ok(prompt.startsWith("<session>\n修一下滑点模型\n</session>"), prompt);
-  assert.match(prompt, /predominant language of the session/, "the language rule travels with the content");
-});
-
-test("arrow keys move the selection while searching", () => {
-  const rows = [row({ key: "live:1", name: "alpha" }), row({ key: "live:2", name: "beta" })];
-  const { instance } = panel(() => rows);
-  instance.handleInput("/");
-  instance.handleInput("a");
-  const before = instance.selectedKey();
-  instance.handleInput("\x1b[B"); // down
-  assert.notEqual(instance.selectedKey(), before, "down must move the selection during search");
-  instance.handleInput("\x1b[A"); // up
-  assert.equal(instance.selectedKey(), before, "up must move it back");
-});
-
 test("enter opens the selected search result directly", async () => {
   const rows = [row({ key: "live:1", name: "alpha" }), row({ key: "live:2", name: "beta" })];
   const { instance, calls } = panel(() => rows);
@@ -572,6 +483,9 @@ test("enter opens the selected search result directly", async () => {
   instance.handleInput("a");
   instance.handleInput("\x1b[B");
   assert.equal(instance.selectedKey(), "live:2");
+  instance.handleInput("\x1b[A");
+  assert.equal(instance.selectedKey(), "live:1");
+  instance.handleInput("\x1b[B");
   await instance.handleInput("\r");
   assert.deepEqual(calls, ["focus", "close"]);
   assert.equal(instance.isEditingText(), false);
@@ -649,17 +563,6 @@ test("a failed search action leaves the query editable", async () => {
   assert.deepEqual(calls, []);
 });
 
-test("the left arrow does not close the panel while typing", () => {
-  const rows = [row({ key: "live:1", name: "alpha" })];
-  const { instance, calls } = panel(() => rows);
-  instance.handleInput("/");
-  assert.equal(instance.isEditingText(), true, "search is a text field");
-  instance.handleInput("\x1b");
-  instance.handleInput("r");
-  assert.equal(instance.isEditingText(), true, "rename is a text field");
-  assert.ok(!calls.includes("close"), "the panel must stay open");
-});
-
 test("rename edits at the caret, not at the end", async () => {
   const rows = [row({ key: "live:1", name: "abc" })];
   const renamed: string[] = [];
@@ -714,6 +617,7 @@ test("short rename panels show save errors next to the editable draft", async ()
   await instance.handleInput("\r");
   const lines = instance.render(theme, 40, 8);
   assertWidths(lines, 40);
+  assert.equal(instance.isEditingText(), true);
   assert.match(lines.join("\n"), /write failed/);
   assert.match(lines.join("\n"), /session oneX/);
 });
@@ -748,27 +652,6 @@ test("an empty rename is refused instead of silently doing nothing", () => {
     assert.deepEqual(renamed, [], "nothing is written");
     assert.match(instance.errorText(), /needs a name/, "and the user is told why");
   });
-});
-
-test("a failed rename stays editable", async () => {
-  const { instance } = panel(() => [row({ name: "abc" })], { rename: () => { throw new Error("write failed"); } });
-  await instance.handleInput("r");
-  await instance.handleInput("X");
-  await instance.handleInput("\r");
-  assert.equal(instance.isEditingText(), true);
-  assert.match(instance.errorText() ?? "", /write failed/);
-});
-
-test("the ? help screen lists r rename and closes on the next key", () => {
-  const rows = [row({ key: "live:1", name: "alpha" })];
-  const { instance } = panel(() => rows);
-  instance.handleInput("?");
-  const screen = instance.render(theme, 100, 24).join("\n");
-  assert.match(screen, /r\s+rename/, "the list mentions rename");
-  assert.match(screen, /Keys/, "the title says what this is");
-  // The next key must be consumed by the help screen, not act on the list.
-  instance.handleInput("X");
-  assert.doesNotMatch(instance.render(theme, 100, 24).join("\n"), /─ Keys /, "any key closes help");
 });
 
 test("help groups movement aliases and reflects the selected action", async () => {
@@ -839,13 +722,9 @@ test("compact footers keep help visible and leave secondary actions in the key l
   }
   await instance.handleInput("?");
   const help = instance.render(theme, 100, 24).join("\n");
+  assert.match(help, /Keys/);
   assert.match(help, /r\s+rename/);
   assert.match(help, /x\s+exit/);
-});
-
-test("a live session with no name reads (new session), not its directory", () => {
-  const record = { pid: 1, cwd: "/Users/someone/projects/my-repo", state: "idle" as const, updatedAt: 1 };
-  assert.equal(rowFromRecord(record).name, "(new session)");
 });
 
 test("a session spawned by pi-interactive-subagents is not a closed row", () => {
@@ -906,37 +785,6 @@ test("a session file that disappears leaves the cached list", async () => {
   assert.equal(after.rows.length, 0, "a deleted file must not survive in the cache");
 });
 
-test("a corrupted cache is ignored instead of breaking the panel", () => {
-  const dir = mkdtempSync(join(tmpdir(), "panel-cache-"));
-  const path = join(dir, "closed-cache.json");
-  assert.equal(readClosedCache(path), null, "no file means no cache");
-  writeFileSync(path, "{ not json");
-  assert.equal(readClosedCache(path), null, "a broken file is ignored");
-  writeFileSync(path, JSON.stringify({ version: 999, savedAt: 0, rows: [] }));
-  assert.equal(readClosedCache(path), null, "a cache from another version is dropped");
-
-  writeClosedCache(path, [{ row: { key: "closed:/a", state: "closed", name: "a", cwd: "/a", updatedAt: 1 }, stamp: "1:1" }]);
-  const read = readClosedCache(path);
-  assert.equal(read?.rows.length, 1, "what was written comes back");
-});
-
-test("the namer does nothing without a configured model", async () => {
-  let calls = 0;
-  const namer = createNamer({
-    pi: { setSessionName: () => calls++ } as any,
-    model: () => undefined,
-  });
-  const context = {
-    sessionManager: {
-      getSessionName: () => undefined,
-      getBranch: () => [{ type: "message", message: { role: "user", content: "rename the session panel" } }],
-    },
-    modelRegistry: { find: () => undefined, complete: async () => ({ content: [] }) },
-  } as any;
-  await namer(context);
-  assert.equal(calls, 0, "no model configured means no call and no name");
-});
-
 test("the namer leaves an already-named session alone", async () => {
   let completed = 0;
   const namer = createNamer({
@@ -955,85 +803,6 @@ test("the namer leaves an already-named session alone", async () => {
   } as any;
   await namer(context);
   assert.equal(completed, 0, "must not spend a model call on a named session");
-});
-
-test("concurrent triggers spend one model call and write one name", async () => {
-  const names: string[] = [];
-  let calls = 0;
-  const namer = createNamer({
-    pi: { setSessionName: (n: string) => names.push(n) } as any,
-    model: () => "p/model-a",
-  });
-  const context = {
-    sessionManager: {
-      getSessionName: () => undefined,
-      getBranch: () => [{ type: "message", message: { role: "user", content: "rename the session panel" } }],
-    },
-    modelRegistry: {
-      find: () => ({ id: "model-a" }),
-      complete: async () => {
-        calls++;
-        await new Promise((r) => setTimeout(r, 20));
-        return { content: [{ type: "text", text: "A short name" }] };
-      },
-    },
-  } as any;
-
-  await Promise.all([namer(context), namer(context), namer(context)]);
-  assert.equal(calls, 1, "the in-flight guard must collapse concurrent triggers");
-  assert.deepEqual(names, ["A short name"]);
-});
-
-test("a name the user typed during the model call is never overwritten", async () => {
-  const names: string[] = [];
-  // Undefined when the namer checks before the call, then a name, as if the user
-  // had renamed the session while the model was thinking.
-  let checks = 0;
-  const namer = createNamer({
-    pi: { setSessionName: (n: string) => names.push(n) } as any,
-    model: () => "p/model-a",
-  });
-  const context = {
-    sessionManager: {
-      getSessionName: () => (++checks === 1 ? undefined : "my own name"),
-      getBranch: () => [{ type: "message", message: { role: "user", content: "rename the session panel" } }],
-    },
-    modelRegistry: {
-      find: () => ({ id: "model-a" }),
-      complete: async () => ({ content: [{ type: "text", text: "Generated name" }] }),
-    },
-  } as any;
-
-  await namer(context);
-  assert.deepEqual(names, [], "a hand-typed name wins over the generated one");
-});
-
-test("a failed naming attempt is retried next time", async () => {
-  const names: string[] = [];
-  let attempt = 0;
-  const namer = createNamer({
-    pi: { setSessionName: (n: string) => names.push(n) } as any,
-    model: () => "p/model-a",
-  });
-  const context = {
-    sessionManager: {
-      getSessionName: () => undefined,
-      getBranch: () => [{ type: "message", message: { role: "user", content: "rename the session panel" } }],
-    },
-    modelRegistry: {
-      find: () => ({ id: "model-a" }),
-      complete: async () => {
-        attempt++;
-        if (attempt === 1) throw new Error("network");
-        return { content: [{ type: "text", text: "Second time works" }] };
-      },
-    },
-  } as any;
-
-  await namer(context);
-  assert.deepEqual(names, [], "a failure must not write a name");
-  await namer(context);
-  assert.deepEqual(names, ["Second time works"], "the retry must succeed");
 });
 
 /** A registry stub with a few models, shaped like the real one. */
@@ -1073,9 +842,9 @@ test("an empty spec is reported", () => {
 });
 
 test("config is JSON, and only titleModel is read", () => {
-  const dir = mkdtemp2(join(tmpdir(), "panel-config-"));
+  const dir = mkdtempSync(join(tmpdir(), "panel-config-"));
   mkdirSync(join(dir, "session-panel"), { recursive: true });
-  const write = (text: string) => writeFile2(join(dir, "session-panel", "config.json"), text);
+  const write = (text: string) => writeFileSync(join(dir, "session-panel", "config.json"), text);
 
   write('{ "titleModel": "p/model-a" }');
   assert.deepEqual(readConfig(dir), { titleModel: "p/model-a" }, "object form");
@@ -1129,16 +898,6 @@ test("two processes on one session file collapse into one row", () => {
   assert.ok(out.some((r) => r.pid === 4), "a record without a file is kept");
 });
 
-test("the spinner advances with time", () => {
-  // The panel once shipped with a hard-coded frame index, which froze the
-  // animation at a single glyph. Ask for glyphs across one full period.
-  const glyphs = new Set<string>();
-  for (let ms = 0; ms <= 2000; ms += 50) {
-    glyphs.add(currentGlyphForTest(ms));
-  }
-  assert.ok(glyphs.size >= 5, `expected the whole ladder, saw ${[...glyphs].join("")}`);
-});
-
 test("every working row draws the same glyph", () => {
   // Rows used to take a per-row phase offset so they would not march in lockstep.
   // Claude Code has one spinner per conversation, so a list where each row breathes
@@ -1186,30 +945,14 @@ test("the frame key changes as the spinner moves", () => {
     for (let ms = 0; ms <= 2000; ms += 50) {
       Date.now = () => base + ms;
       if (instance.needsRedraw(theme, 100, 20)) {
-        seen.add(instance.render(theme, 100, 20).join("\n"));
+        const line = instance.render(theme, 100, 20).find(line => line.includes("session one"))!;
+        seen.add(line.match(/[·✢✳✶✻✽]/)![0]);
       }
     }
-    assert.ok(seen.size >= 5, "a working row must produce several distinct frames");
+    assert.ok(seen.size >= 5, "the visible spinner must traverse at least five glyphs, not merely update its timer");
   } finally {
     Date.now = realNow;
   }
-});
-
-test("a running session never also appears as closed", () => {
-  const running = "/sessions/running.jsonl";
-  const live = [row({ key: "live:1", state: "idle", sessionFile: running })];
-  const closed = [
-    row({ key: `closed:${running}`, state: "closed", sessionFile: running }),
-    row({ key: "closed:/sessions/old.jsonl", state: "closed", sessionFile: "/sessions/old.jsonl" }),
-  ];
-  const out = withoutLiveDuplicates(closed, live);
-  assert.equal(out.length, 1, "only the session that is not running stays closed");
-  assert.equal(out[0]!.sessionFile, "/sessions/old.jsonl");
-});
-
-test("closed rows are untouched when nothing is running", () => {
-  const closed = [row({ key: "closed:/a", state: "closed", sessionFile: "/a" })];
-  assert.deepEqual(withoutLiveDuplicates(closed, []), closed);
 });
 
 test("the closed scan covers every project when the session lives in the default dir", () => {

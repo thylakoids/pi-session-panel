@@ -32,6 +32,8 @@
     "@earendil-works/pi-tui": "1.4.0"
   },
   "scripts": {
-    "test": "node --test --experimental-strip-types test/*.test.ts"
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "benchmark": "node --experimental-strip-types scripts/benchmark.ts",
+    "test:coverage": "node --test --test-concurrency=1 --experimental-test-isolation=none --experimental-strip-types --experimental-test-coverage --test-coverage-include=\"extension/**\" test/*.test.ts"
   }
 }

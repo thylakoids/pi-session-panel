@@ -1,9 +1,4 @@
-/**
- * Editor that turns "left arrow in an empty input" into a gesture.
- *
- * This replaces the whole input box for every pi session that loads the package,
- * so it passes everything else straight through. See docs/adr/0004.
- */
+/** Empty-input left-arrow gesture; all other editor behavior passes through. */
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
 

@@ -1,26 +1,9 @@
-/**
- * Automatic session naming. See docs/adr/0007 and docs/adr/0008.
- *
- * One check decides everything: a session with no name and at least one user
- * message gets a name. That single rule covers every scenario — a fresh session
- * after its first prompt, a resumed session that never had a name, and a retry
- * after a failed attempt — so there is no scenario-specific branching.
- *
- * What goes into the prompt follows Claude Code 2.1.304, whose session titles sit
- * in exactly the same kind of list. See docs/adr/0008 for what was copied and why.
- */
+/** Automatic session naming. See docs/adr/0007 and docs/adr/0008. */
 import { stripVTControlCharacters } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
-/**
- * The title rules. Long on purpose: every sentence here closes a failure mode that
- * a one-line "write a short title" prompt walks straight into — a title that opens
- * with "Fix…", one that ends in "investigation", a generic label for a session
- * about a pasted stack trace, an explanation glued on after a dash.
- *
- * Claude Code ships this same text as the system prompt of its title generator.
- */
+/** Shared automatic/manual title rules. See docs/adr/0008 for provenance. */
 const SYSTEM_PROMPT = [
   "You are naming a coding session so the user can pick it out of a long list of sessions.",
   "The title is a name for what the session is about, not a sentence describing the task:",
@@ -60,12 +43,7 @@ const SYSTEM_PROMPT = [
   "The title itself is plain text: no quotes, no punctuation, no explanation.",
 ].join(" ");
 
-/**
- * The language rule, sent in the user turn rather than the system prompt.
- *
- * Claude Code puts it there, and it matters: the system prompt speaks for the
- * harness, while this sentence has to read as a property of the session being named.
- */
+/** The language rule, sent in the user turn rather than the system prompt. */
 const LANGUAGE_RULE =
   "Write the title in the predominant language of the session — a stray word or code token " +
   "in another language does not change it, and neither does the English of these instructions.";
@@ -77,30 +55,17 @@ const MIN_UNITS = 3;
 const NAMING_TIMEOUT_MS = 30_000;
 const NAMING_OUTPUT_TOKENS = 512;
 
-/**
- * How much naming information a message carries.
- *
- * Every CJK ideograph, kana or hangul syllable counts as one unit, because one
- * character is one word there. A run of Latin letters, digits or symbols counts as
- * one unit, because that is a word. Punctuation and whitespace carry no subject.
- */
+/** How much naming information a message carries. */
 export function namingUnits(text: string): number {
-  const cjk = text.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu)?.length ?? 0;
-  const words = text
-    .replace(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu, " ")
-    .match(/[\p{L}\p{N}_]+/gu)?.length ?? 0;
-  return cjk + words;
+  const cjk = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
+  return (text.match(cjk)?.length ?? 0) + (text.replace(cjk, " ").match(/[\p{L}\p{N}_]+/gu)?.length ?? 0);
 }
-
 /** Claude Code reports how much it dropped; the marker is part of the prompt. */
 function omissionMarker(omitted: number): string {
   return "\n[… " + omitted + " characters omitted …]\n";
 }
 
-/**
- * Elide the middle of an over-long message: keep the head, keep the tail, say how
- * much went missing. Exported for tests.
- */
+/** Keep the task head and recent tail, with an exact omitted-character count. */
 export function capInput(text: string, limit = CONTENT_LIMIT): string {
   if (text.length <= limit) return text;
   let marker = omissionMarker(text.length - limit);
@@ -119,25 +84,10 @@ export function capInput(text: string, limit = CONTENT_LIMIT): string {
 function textOf(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content
-    .map((part) =>
-      typeof part === "object" && part && "type" in part && (part as { type: string }).type === "text"
-        ? String((part as { text: unknown }).text ?? "")
-        : "",
-    )
-    .join("");
+  return content.map(part => part?.type === "text" ? String(part.text ?? "") : "").join("");
 }
 
-/**
- * What the model gets to name, following Claude Code "UPn": every human turn on the
- * branch joined by newlines, plus the prompt that has not landed on the branch yet,
- * keeping the head and tail within `limit` characters (1000 for automatic naming).
- *
- * Every human turn, not just the first: a session that opens with "看下这个" and then
- * pastes the error only makes sense with the paste included. Assistant text is left
- * out because it reacts to the ask instead of stating it, and tool results are output
- * the user never wrote. The shared cap keeps long sessions cheap without losing the initial task.
- */
+/** Human turns on the current branch, plus a prompt not yet persisted. */
 export function sessionContent(
   entries: readonly { type: string; message?: { role: string; content?: unknown } }[],
   pending?: string,
@@ -149,16 +99,10 @@ export function sessionContent(
     parts.push(textOf(entry.message.content));
   }
   if (pending?.trim()) parts.push(pending);
-  const joined = parts.join("\n");
-  return capInput(joined, limit);
+  return capInput(parts.join("\n"), limit);
 }
 
-/**
- * Text to name from, or undefined when there is nothing worth naming.
- *
- * Exported for tests. `text` is the prompt that just arrived; at `before_agent_start`
- * it is not on the branch yet, so it is passed in and appended.
- */
+/** Text to name from, or undefined when there is nothing worth naming. */
 export function nameSource(
   entries: readonly { type: string; message?: { role: string; content?: unknown } }[],
   text?: string,
@@ -168,19 +112,7 @@ export function nameSource(
   return namingUnits(subject) < MIN_UNITS ? undefined : content;
 }
 
-/** Claude Code's \`wB\`: models still fence JSON in markdown often enough to strip it. */
-function stripFence(text: string): string {
-  return text.replace(/^```[a-zA-Z]*\s*/, "").replace(/\s*```\s*$/, "");
-}
-
-/**
- * The \`title\` field, empty for invalid structured output, or undefined for plain text.
- *
- * Claude Code gets this for free: its \`json_schema\` output format makes the
- * provider produce exactly \`{"title": ...}\`. pi's \`complete()\` has no response
- * format, so the instruction in the prompt is all there is and the reply has to be
- * parsed leniently -- a model that wraps it in prose must still yield its title.
- */
+/** The \`title\` field, empty for invalid structured output, or undefined for plain text. */
 function titleFromJson(text: string): string | undefined {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
@@ -194,21 +126,9 @@ function titleFromJson(text: string): string | undefined {
   }
 }
 
-/**
- * Turn whatever the model replied into a plain-text name.
- *
- * pi has no response format, so the reply arrives unconstrained and this has to
- * survive a model that narrates its own edits: the reply
- * `Pi hermes-memory 调研与风险分析 — 改为："pi-hermes-memory 项目调研"（避免动词）`
- * is a real one that became a session name. The order below matters — take the JSON
- * field if there is one, cut the explanation, drop the aside, then strip punctuation
- * — and identifier characters (`.`, `-`, `_`) survive, because a name like
- * `naming.ts` or `pi-session-panel` is the most useful thing a title can carry.
- *
- * Exported for tests.
- */
+/** Turn whatever the model replied into a plain-text name. */
 export function cleanTitle(raw: string): string {
-  let text = stripFence(raw.trim());
+  let text = raw.trim().replace(/^```[a-zA-Z]*\s*/, "").replace(/\s*```\s*$/, "");
   const json = titleFromJson(text);
   if (json !== undefined) text = json;
 
@@ -221,14 +141,11 @@ export function cleanTitle(raw: string): string {
   // Only a spaced dash splits: "pi-session-panel" is one token, "A — B" is two.
   text = text.split(/\s+[\u2013\u2014-]+\s+|\s*[\u2013\u2014]+\s*/)[0] ?? text;
 
-  // A parenthetical aside is commentary about the title, not part of it.
   text = text.replace(/[\uFF08(][^\uFF08\uFF09()]*[\uFF09)]/g, " ");
 
-  // Quotes and brackets never belong in a name.
   text = text.replace(/["'`\u2018\u2019\u201c\u201d\u300c\u300d\u300e\u300f]/g, "");
   text = text.replace(/[\[\]{}()\u3010\u3011\uFF08\uFF09]/g, " ");
 
-  // Separators become spaces; sentence punctuation is dropped with them.
   text = text.replace(/[,;:\uFF0C\uFF1B\uFF1A\u3001\u3002\uFF01\uFF1F!?]/g, " ");
   text = text.replace(/[\u2026\u00b7]/g, " ");
 
@@ -238,7 +155,6 @@ export function cleanTitle(raw: string): string {
 
   text = text.replace(/\s+/g, " ").trim();
 
-  // A space between two CJK characters is a layout artefact, never a word break.
   text = text.replace(
     /(?<=[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af])\s+(?=[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af])/g,
     "",
@@ -261,20 +177,11 @@ export interface NamerOptions {
   onNamed?: (name: string) => void;
   /** Adopt names saved by other panels before an automatic result can be written. */
   syncName?: () => void;
-  /**
-   * Called at most once per process when naming cannot work. Naming fails
-   * silently by design, so without this a misconfigured model is invisible.
-   */
+  /** Report an invalid model configuration once per process. */
   onBroken?: (reason: string) => void;
 }
 
-/**
- * Resolve `provider/model` against the registry.
- *
- * Only the first slash separates provider from id, because model ids may contain
- * slashes of their own. Nothing else is inferred: an id that does not resolve is
- * a configuration mistake, and saying so beats guessing at what was meant.
- */
+/** Resolve `provider/model` against the registry. */
 export function resolveModel(
   registry: ExtensionContext["modelRegistry"],
   spec: string,
@@ -340,11 +247,7 @@ export async function generateSessionTitle(
   return completeTitle(context, resolved.model, source, signal);
 }
 
-/**
- * Returns `maybeName`. Call its cancel method at lifecycle boundaries.
- * It is safe to call from any hook, as often as you like:
- * it returns immediately when there is nothing to do, and it never throws.
- */
+/** Returns `maybeName`. Call its cancel method at lifecycle boundaries. */
 export function createNamer(options: NamerOptions) {
   // Identity as well as cancellation matters: an old finally must not release
   // the guard belonging to a newer request.
@@ -354,14 +257,9 @@ export function createNamer(options: NamerOptions) {
     active = undefined;
     previous?.abort();
   };
-  /** Naming failures are reported once, not on every prompt. */
   let reportedBroken = false;
 
-  /**
-   * `text` is the prompt that just arrived. At `before_agent_start` it is not on the
-   * branch yet, so it has to be passed in; when it is absent, the branch is used,
-   * which is what a resumed session needs.
-   */
+  /** Pending text has not yet been added to the branch. */
   async function maybeName(context: ExtensionContext, text?: string): Promise<void> {
     if (active) return;
     if (context.sessionManager.getSessionName()?.trim()) return;
@@ -373,7 +271,6 @@ export function createNamer(options: NamerOptions) {
 
     const resolved = resolveModel(context.modelRegistry, spec);
     if ("error" in resolved) {
-      // Once per process: the user needs to know, but not on every prompt.
       if (!reportedBroken) {
         reportedBroken = true;
         options.onBroken?.(resolved.error);

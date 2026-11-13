@@ -24,12 +24,20 @@ export interface SessionRow {
   pane?: string;
   /** Session JSONL path. Closed rows and live rows that know their file. */
   sessionFile?: string;
-  /**
-   * Everything pi -r searches in this session: its id, name, all message text and
-   * cwd. Present for closed rows, which already parsed it, and filled lazily for
-   * live rows the first time a search runs.
-   */
+  /** Search haystack: session ID, name, message text and working directory. */
   searchText?: string;
   /** Session id, shown and searched the way pi -r does. */
   sessionId?: string;
+}
+
+/** Exact row equality shared by snapshots and the mutable-source fallback. */
+export function sameRows(a: readonly SessionRow[], b: readonly SessionRow[]): boolean {
+  return a.length === b.length && a.every((r, i) => {
+    const p = b[i]!;
+    return r === p || (r.key === p.key && r.state === p.state && r.name === p.name && r.cwd === p.cwd &&
+      r.updatedAt === p.updatedAt && r.workingSince === p.workingSince && r.current === p.current &&
+      r.searchText === p.searchText && r.sessionId === p.sessionId && r.sessionFile === p.sessionFile &&
+      r.pane === p.pane && r.processIdentity === p.processIdentity &&
+      r.exitControl?.endpoint === p.exitControl?.endpoint && r.exitControl?.token === p.exitControl?.token);
+  });
 }

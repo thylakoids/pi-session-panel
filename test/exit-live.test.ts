@@ -15,7 +15,7 @@ async function until(check: () => boolean, label: string, ms = 10_000) {
   while (!check()) { assert.ok(Date.now() < deadline, label); await pause(); }
 }
 
-test("real Pi TUI Idle X exits the target; reload and stale/busy checks remain safe", {
+test("real Pi TUI exits Idle targets; reload and stale/busy checks remain safe", {
   skip: process.env.PI_PANEL_EXIT_LIVE !== "1", timeout: 60_000,
 }, async t => {
   const dir = mkdtempSync("/tmp/pi-panel-exit-live-");
@@ -41,16 +41,17 @@ test("real Pi TUI Idle X exits the target; reload and stale/busy checks remain s
   const alive = (pane: string) => tmux(["display-message", "-p", "-t", pane, "#{pane_dead}"]) === "0";
   const launch = async (role: string) => {
     const file = join(dir, role + ".jsonl");
+    const startedAt = Date.now() - (role === "target" ? 120_000 : 0);
     writeFileSync(file, [
-      { type: "session", version: 3, id: "exit-e2e-" + role, timestamp: new Date().toISOString(), cwd: dir },
-      { type: "message", id: "u", parentId: null, message: { role: "user", content: "Isolated exit fixture; never call a model", timestamp: Date.now() } },
+      { type: "session", version: 3, id: "exit-e2e-" + role, timestamp: new Date(startedAt).toISOString(), cwd: dir },
+      { type: "message", id: "u", parentId: null, message: { role: "user", content: "Isolated exit fixture; never call a model", timestamp: startedAt } },
       { type: "session_info", id: "n", parentId: "u", name: "E2E " + role },
     ].map(row => JSON.stringify(row)).join("\n") + "\n");
     const pane = tmux(["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", role, "-x", "120", "-y", "35", "-c", dir,
       "env", "PATH=" + path, "PI_CODING_AGENT_DIR=" + agent, "PI_OFFLINE=1", "TERM=xterm-256color",
       "PI_PANEL_EXIT_LIVE_DIR=" + dir, "PI_PANEL_EXIT_LIVE_ROLE=" + role,
       pi, "--offline", "-ne", "-ns", "-np", "-nc", "--no-mcp", "--no-tools", "--approve",
-      "-e", resolve(import.meta.dirname, "../extension/index.ts"), "-e", resolve(import.meta.dirname, "fixtures/exit-live.ts"), "--session", file]);
+      "-e", resolve(import.meta.dirname, "../extension/index.ts"), "-e", resolve(import.meta.dirname, "fixtures/exit-live.ts"), "--session-dir", dir, "--session", file]);
     tmux(["set-option", "-g", "remain-on-exit", "on"]);
     const fixture = { role, pane, file }; fixtures.push(fixture);
     await until(() => Boolean(record(file)?.exitControl), role + " must register its actual IPC endpoint");
@@ -80,8 +81,15 @@ test("real Pi TUI Idle X exits the target; reload and stale/busy checks remain s
   assert.ok(events("target").some(event => event.event === "session_start" && event.reason === "reload"));
   writeFileSync(join(dir, "target-after-reload.txt"), capture(target.pane));
 
+  // Populate history before opening so the live target already exists in the index.
+  for (let i = 0; i < 40; i++) writeFileSync(join(dir, "history-" + i + ".jsonl"), [
+    { type: "session", version: 3, id: "history-" + i, timestamp: new Date(Date.now() - 60_000 - i).toISOString(), cwd: dir },
+    { type: "message", id: "u", parentId: null, message: { role: "user", content: "Retained history " + i, timestamp: Date.now() - 60_000 - i } },
+    { type: "session_info", id: "name", parentId: "u", name: "Older history " + i },
+  ].map(entry => JSON.stringify(entry)).join("\n") + "\n");
   command(host.pane, "/sessions");
   await until(() => capture(host.pane).includes("Sessions") && capture(host.pane).includes("E2E target"), "real production panel must display the target");
+  await until(() => capture(host.pane).includes("40 closed"), "history scan must index the live target before X");
   tmux(["send-keys", "-t", host.pane, "Home"]);
   await until(() => /❯\s+○\s+E2E target/.test(capture(host.pane)), "the selected Idle row must be the fixture target");
   writeFileSync(join(dir, "panel-before-x.txt"), capture(host.pane));
@@ -92,7 +100,9 @@ test("real Pi TUI Idle X exits the target; reload and stale/busy checks remain s
   assert.equal(existsSync(reloaded.exitControl!.endpoint), false);
   assert.ok(alive(host.pane), "host Pi must remain alive");
   assert.ok(events("target").some(event => event.event === "session_shutdown"));
-  await until(() => capture(host.pane).includes("Closed"), "the real panel must show Closed after accepted exit");
+  await until(() => /Closed[\s\S]*· E2E target/.test(capture(host.pane)), "the exited target must be visible in Closed without R");
+  const afterExit = capture(host.pane).split("\n");
+  assert.match(afterExit[afterExit.findIndex(line => line.includes("Closed")) + 1]!, /· E2E target/, "the exited target must be the first Closed row");
   writeFileSync(join(dir, "panel-after-x.txt"), capture(host.pane));
 
   const busy = await launch("busy");
@@ -113,7 +123,7 @@ test("real Pi TUI Idle X exits the target; reload and stale/busy checks remain s
     assert.ok(!events(fixture.role).some(event => event.event.startsWith("forbidden_")), "no model/provider call may occur");
   }
   const result = { ok: true, pi, platform: process.platform, targetPid: reloaded.pid, hostPid: record(host.file)!.pid,
-    checks: ["real-tui-idle-x", "real-target-shutdown-exit-0", "registry-and-endpoint-cleanup", "real-reload-new-credentials-same-pid", "stale-row-and-token-refusal", "real-pre-model-busy-refusal", "no-model-calls"],
+    checks: ["inline-rename-preserves-list", "inline-caret-enter-saves", "inline-escape-cancels", "real-tui-idle-x", "real-target-shutdown-exit-0", "closed-transition-at-top-with-existing-history", "registry-and-endpoint-cleanup", "real-reload-new-credentials-same-pid", "stale-row-and-token-refusal", "real-pre-model-busy-refusal", "no-model-calls"],
     limits: "Busy is a real Pi run held in before_agent_start before any provider request; it is not a completed streaming model turn. The held fixture is aborted before its first provider call and then quits through the normal Pi shutdown path." };
   writeFileSync(join(dir, "result.json"), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result));

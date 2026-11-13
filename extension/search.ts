@@ -1,16 +1,4 @@
-/**
- * Search, matching `pi -r` exactly.
- *
- * pi builds its haystack as `${id} ${name ?? ""} ${allMessagesText} ${cwd}` and
- * then applies either a regex (`re:...`) or a list of tokens where a bare word
- * is a fuzzy match and a "quoted phrase" must appear verbatim. This reproduces
- * both, because a panel that searches differently from the command it mirrors is
- * worse than no search at all.
- *
- * The parser and matcher live in pi's session picker, which is not exported from
- * the package entry point, so they are reproduced here against the same
- * primitives (pi-tui's `fuzzyMatch`).
- */
+/** Search, matching `pi -r` exactly. */
 import { fuzzyMatch } from "@earendil-works/pi-tui";
 
 export interface ParsedSearch {
@@ -43,7 +31,6 @@ export function parseSearch(query: string): ParsedSearch {
   const tokens: ParsedSearch["tokens"] = [];
   let buffer = "";
   let inQuote = false;
-  let unclosedQuote = false;
   const flush = (kind: "fuzzy" | "phrase") => {
     const value = buffer.trim();
     buffer = "";
@@ -60,33 +47,25 @@ export function parseSearch(query: string): ParsedSearch {
       }
       continue;
     }
-    // Outside quotes whitespace ends a token: "bar foo" is two fuzzy words, not
-    // one phrase-like token. Keeping the space made the query match in a different
-    // order than pi -r, which splits on it.
     if (!inQuote && /\s/.test(character)) {
       flush("fuzzy");
       continue;
     }
     buffer += character;
   }
-  if (inQuote) unclosedQuote = true;
 
-  // An unbalanced quote makes the intent unknowable, so pi -r drops back to plain
-  // whitespace tokens. Treating the rest of the line as one phrase instead made the
-  // panel match sessions pi -r hides.
-  if (unclosedQuote) {
+  // Match pi -r: unbalanced quotes fall back to whitespace tokens.
+  if (inQuote) {
     return {
       mode: "tokens",
       tokens: trimmed
         .split(/\s+/)
-        .map((part) => part.trim())
-        .filter((part) => part.length > 0)
         .map((part) => ({ kind: "fuzzy" as const, value: part })),
       regex: null,
     };
   }
 
-  flush(inQuote ? "phrase" : "fuzzy");
+  flush("fuzzy");
   return { mode: "tokens", tokens, regex: null };
 }
 

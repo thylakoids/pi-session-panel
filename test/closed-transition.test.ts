@@ -81,6 +81,30 @@ async function harness(t: TestContext, late = false, empty = false) {
   };
 }
 
+test("production Idle x exposes an already indexed target at the top of Closed without R", async t => {
+  const h = await harness(t);
+  await h.scanned;
+  await until(() => h.screen().includes("41 closed"));
+  assert.match(h.screen(), /❯ ○ Target session/);
+  await h.exit();
+  const screen = h.screen();
+  assert.match(screen, /0 live · 42 closed/);
+  assert.match(screen, /Closed[^]*· Target session/);
+  assert.ok(screen.indexOf("Target session") < screen.indexOf("Older session"));
+});
+
+test("a history scan started before the target file existed cannot erase a successful exit", async t => {
+  const h = await harness(t, true);
+  await h.scanned;
+  h.persistTarget();
+  await h.exit();
+  assert.match(h.screen(), /Closed[^]*· Target session/);
+  h.release();
+  await until(() => h.screen().includes("Older session"));
+  assert.match(h.screen(), /0 live · 2 closed/);
+  assert.match(h.screen(), /Closed[^]*· Target session/);
+});
+
 test("Idle x deletes a metadata-only session without adding it to Closed", async t => {
   const h = await harness(t, false, true);
   await h.scanned;
