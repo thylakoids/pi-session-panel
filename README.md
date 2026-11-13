@@ -54,6 +54,8 @@ pi install ~/Agent/pi-session-panel
 | Idle | 注册表里 `state: "idle"` 的进程 | 目标核对实例凭据、会话和 Idle 状态后自行优雅退出 |
 | Closed | `SessionManager.listAll()`，与 `pi -r` 同源 | 删除磁盘上的会话文件（需确认） |
 
+零消息、仅含初始化元数据的空会话从 Idle 按 X 退出后直接删除，不进入 Closed。历史扫描也隐藏已有空会话，判断不依赖 `(new session)` 标题。
+
 Idle 退出支持 macOS 和 Linux：更新后的目标 Pi 登记私有本地 socket 和每次加载独有的凭据，面板发送退出请求，目标在同一次回调中检查当前会话及 Idle 状态，再调用 Pi 的 `shutdown()`。PID 被复用、旧行、已开始 Working、会话变化或通道失联时拒绝；通道失败不会退回按 PID 强制退出。请求最多等 2 秒。
 
 升级后，**面板宿主和每个需要退出的目标 Pi 都要在空闲时 `/reload` 或重启**，再重新打开 `/sessions`。仅重载面板宿主不能替旧目标登记通道。旧 Linux 记录仍可使用原有 boot ID + 启动 tick 校验路径；没有可验证登记的旧记录提示重载目标，不能自动补造身份。详见 [ADR 0013](./docs/adr/0013-verify-process-identity-before-exit.md)。

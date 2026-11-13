@@ -11,7 +11,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { createGestureEditor } from "./editor.ts";
 import { SessionsPanel } from "./panel.ts";
-import { closedScanDir, insertClosed, scanClosed, type ClosedIndex } from "./closed.ts";
+import { discardEmptySession, closedScanDir, insertClosed, scanClosed, type ClosedIndex } from "./closed.ts";
 import { readClosedCache, writeClosedCache, type CachedClosedRow } from "./closed-cache.ts";
 import { configPath, readConfig, writeConfigExample } from "./config.ts";
 import { createNamer, generateSessionTitle } from "./naming.ts";
@@ -353,6 +353,12 @@ const RESTORE_SESSION = "pi-sessions";
   /** Idle rows: ask the process to exit. */
   const exit = async (row: SessionRow) => {
     await stopRegisteredSession(registry, row);
+    if (discardEmptySession(row.sessionFile)) {
+      const key = `closed:${row.sessionFile ?? row.key}`;
+      if (closedIndex) closedIndex = { ...closedIndex, rows: closedIndex.rows.filter(r => r.key !== key) };
+      closedCache = closedCache.filter(entry => entry.row.key !== key);
+      return;
+    }
     // The row lands in Closed straight away, without rescanning the disk.
     if (closedIndex) {
       closedIndex = insertClosed(closedIndex, {

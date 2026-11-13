@@ -9,7 +9,7 @@
  * With the result cached on disk, a fresh pi shows the list from the previous
  * scan instantly and refreshes only what changed.
  */
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir, SessionManager, type SessionInfo } from "@earendil-works/pi-coding-agent";
 import type { CachedClosedRow } from "./closed-cache.ts";
@@ -79,6 +79,24 @@ function firstLine(text: string, limit = 100): string {
   const line = text.split("\n").find((part) => part.trim().length > 0) ?? text;
   const collapsed = line.replace(/\s+/g, " ").trim();
   return collapsed.length > limit ? collapsed.slice(0, limit) + "…" : collapsed;
+}
+
+/** Only discard positively identified metadata-only sessions; malformed/unknown data is retained. */
+export function isEmptySession(file: string): boolean {
+  try {
+    const entries = readFileSync(file, "utf8").split("\n").filter(line => line.trim()).map(line => JSON.parse(line));
+    return entries.every(entry => entry && ["session", "model_change", "thinking_level_change", "session_info", "custom"].includes(entry.type));
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+
+/** Call only after the user has requested this idle session's exit. */
+export function discardEmptySession(file: string | undefined): boolean {
+  if (!file) return true;
+  if (!isEmptySession(file)) return false;
+  rmSync(file, { force: true });
+  return true;
 }
 
 /** Turn a `pi -r` record into a panel row, using pi's own display rule. */
@@ -229,6 +247,7 @@ export async function scanClosed(
     const stamps = new Map((files.get(dir) ?? []).map((file) => [file.path, file.stamp]));
     for (const info of infos) {
       if (isSubagentSession(info.path)) continue;
+      if (info.messageCount === 0 && isEmptySession(info.path)) continue;
       const stamp = stamps.get(info.path);
       // A file the scan did not enumerate was created after it; skip it rather
       // than cache a row whose stamp the next diff cannot match.

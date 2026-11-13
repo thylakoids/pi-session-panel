@@ -13,7 +13,7 @@ import { dirname } from "node:path";
 import type { SessionRow } from "./types.ts";
 
 /** Bumped whenever the filtering or naming rules change, so old caches are dropped. */
-export const CACHE_VERSION = 1;
+export const CACHE_VERSION = 2;
 
 export interface CachedClosedRow {
   row: SessionRow;
