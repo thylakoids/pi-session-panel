@@ -232,58 +232,46 @@ test("x interrupts a working row, exits an idle row, and confirms for a closed r
   await instance.handleInput("x");
   assert.deepEqual(calls, ["interrupt", "exit"], "closed row must not act before confirmation");
 
-  await instance.handleInput("j");
-  await instance.handleInput("\r");
+  await instance.handleInput("x");
   assert.deepEqual(calls, ["interrupt", "exit", "remove"], "confirming must delete");
 });
 
-test("delete confirmation arrows choose and Tab toggles", async () => {
-  const { instance, calls } = panel(() => [row({ state: "closed" })]);
+test("delete confirmation keeps the list and only replaces the footer", async () => {
+  const { instance, calls } = panel(() => [row({ state: "closed", name: "Target session" })]);
+  const before = instance.render(theme, 100, 24);
   await instance.handleInput("x");
-  await instance.handleInput("\x1b[C");
-  await instance.handleInput("\x1b[D");
-  await instance.handleInput("\r");
-  assert.deepEqual(calls, [], "left selects Cancel instead of dismissing or deleting");
-  await instance.handleInput("x");
-  await instance.handleInput("\t");
-  await instance.handleInput("\r");
-  assert.deepEqual(calls, ["remove"], "Tab moves to Delete");
+  const after = instance.render(theme, 100, 24);
+  assert.deepEqual(after.slice(0, -2), before.slice(0, -2));
+  assert.equal(after.at(-1), before.at(-1));
+  assert.match(after.at(-2)!, /x again to delete permanently · esc cancel/);
+  assert.deepEqual(calls, []);
+  await instance.handleInput("\x1b");
+  assert.deepEqual(calls, [], "Escape cancels without closing the panel");
+  assert.doesNotMatch(instance.render(theme, 100, 24).at(-2)!, /permanently/);
 });
 
-test("delete choices stay visible when the panel is short", async () => {
-  const { instance } = panel(() => [row({ state: "closed", sessionFile: "/" + "very-long-directory/".repeat(20) + "session.jsonl" })]);
+test("delete footer fits short and narrow panels", async () => {
+  const { instance } = panel(() => [row({ state: "closed" })]);
   await instance.handleInput("x");
-  for (const width of [24, 40, 80]) {
-    for (const height of [8, 9, 12, 24]) {
-      const lines = instance.render(theme, width, height);
-      assertWidths(lines, width);
-      assert.ok(lines.length <= Math.min(height, 12), "confirmation stays compact");
-      assert.match(lines.join("\n"), /\[❯ Cancel \]/);
-      assert.match(lines.join("\n"), /\[\s+Delete \]/);
-    }
+  for (const width of [24, 40, 80]) for (const height of [8, 12, 24]) {
+    const lines = instance.render(theme, width, height);
+    assertWidths(lines, width);
+    assert.ok(lines.length <= height);
+    assert.match(lines.at(-2)!, /x .*delete/);
+    assert.match(lines.at(-2)!, /esc cancel/);
   }
 });
 
-test("delete confirmation distinguishes the target, warning and selected destructive button", async () => {
-  const styles: { kind: string; token: string; text: string }[] = [];
-  const painted = { ...theme,
-    fg: (token: string, text: string) => { styles.push({ kind: "fg", token, text }); return text; },
-    bg: (token: string, text: string) => { styles.push({ kind: "bg", token, text }); return text; },
-    bold: (text: string) => { styles.push({ kind: "bold", token: "", text }); return text; },
-  };
-  const { instance, calls } = panel(() => [row({ state: "closed", name: "Target session", sessionFile: "/tmp/target.jsonl" })]);
+test("deletion warning uses the existing error color", async () => {
+  const styles: string[] = [];
+  const painted = { ...theme, fg: (token: string, text: string) => {
+    if (token === "error") styles.push(text);
+    return text;
+  }};
+  const { instance } = panel(() => [row({ state: "closed" })]);
   await instance.handleInput("x");
-  instance.render(painted, 80, 24);
-  assert.ok(styles.some(({ kind, text }) => kind === "bold" && text === "Target session"));
-  assert.ok(styles.some(({ token, text }) => token === "dim" && text.includes("target.jsonl")));
-  assert.ok(styles.some(({ token, text }) => token === "warning" && text.includes("Cannot be undone")));
-  assert.ok(styles.some(({ kind, text }) => kind === "bg" && text.includes("❯ Cancel")));
-  await instance.handleInput("\t");
-  styles.length = 0;
-  instance.render(painted, 80, 24);
-  assert.ok(styles.some(({ kind, text }) => kind === "bg" && text.includes("❯ Delete")));
-  assert.ok(styles.some(({ token, text }) => token === "error" && text.includes("Delete")));
-  assert.deepEqual(calls, [], "selecting Delete still needs Enter to confirm");
+  instance.render(painted, 100, 24);
+  assert.ok(styles.includes("x again to delete permanently"));
 });
 
 test("deleting a row immediately selects its neighbour without waiting for render", async () => {
@@ -291,8 +279,7 @@ test("deleting a row immediately selects its neighbour without waiting for rende
   const { instance } = panel(() => rows, { remove: (removed: any) => { rows = rows.filter((entry) => entry.key !== removed.key); } });
   instance.render(theme, 80, 12);
   await instance.handleInput("x");
-  await instance.handleInput("\t");
-  await instance.handleInput("\r");
+  await instance.handleInput("x");
   assert.equal(instance.selectedKey(), "closed:2");
 });
 
@@ -799,13 +786,6 @@ test("help groups movement aliases and reflects the selected action", async () =
   assert.doesNotMatch(closed, /x\s+interrupt/);
 });
 
-test("delete footer groups all selection keys under one action", async () => {
-  const { instance } = panel(() => [row({ state: "closed" })]);
-  await instance.handleInput("x");
-  const screen = instance.render(theme, 120, 24).join("\n");
-  assert.match(screen, /←\/→\/tab choose/);
-  assert.doesNotMatch(screen, /switch/);
-});
 
 test("pasted key names remain text in rename", async () => {
   const renamed: string[] = [];
@@ -1252,3 +1232,53 @@ test("a session manager without the probe still scans every project", () => {
   assert.equal(closedScanDir(manager), undefined);
 });
 
+
+test("moving selection cancels deletion and the next row needs two presses", async () => {
+  const { instance, calls } = panel(() => [row({ key: "a", state: "closed" }), row({ key: "b", state: "closed" })]);
+  instance.render(theme, 100, 20);
+  await instance.handleInput("x");
+  await instance.handleInput("j");
+  assert.equal(instance.selectedKey(), "b");
+  assert.doesNotMatch(instance.render(theme, 100, 20).at(-2)!, /permanently/);
+  await instance.handleInput("x");
+  assert.deepEqual(calls, []);
+  await instance.handleInput("x");
+  assert.deepEqual(calls, ["remove"]);
+});
+
+test("a changed or missing confirmation target cannot be deleted", async () => {
+  for (const change of ["missing", "live", "file"]) {
+    let rows = [row({ key: "a", state: "closed", sessionFile: "/tmp/a" })];
+    const { instance, calls } = panel(() => rows);
+    instance.render(theme, 100, 20);
+    await instance.handleInput("x");
+    rows = change === "missing" ? [] : [row({ key: "a", state: change === "live" ? "idle" : "closed", sessionFile: "/tmp/b" })];
+    await instance.handleInput("x");
+    assert.deepEqual(calls, [], change);
+  }
+});
+
+test("key repeat cannot arm or confirm deletion", async () => {
+  const { instance, calls } = panel(() => [row({ state: "closed" })]);
+  instance.render(theme, 100, 20);
+  await instance.handleInput("\x1b[120;1:2u");
+  assert.doesNotMatch(instance.render(theme, 100, 20).at(-2)!, /permanently/);
+  await instance.handleInput("x");
+  await instance.handleInput("\x1b[120;1:2u");
+  assert.deepEqual(calls, []);
+  await instance.handleInput("x");
+  assert.deepEqual(calls, ["remove"]);
+});
+
+test("failed deletion leaves the list visible and requires confirmation again", async () => {
+  let attempts = 0;
+  const { instance } = panel(() => [row({ state: "closed", name: "Keep me" })], { remove: () => { attempts++; throw new Error("Permission denied"); } });
+  await instance.handleInput("x");
+  await instance.handleInput("x");
+  assert.equal(attempts, 1);
+  const screen = instance.render(theme, 100, 20).join("\n");
+  assert.match(screen, /Keep me/);
+  assert.match(screen, /Permission denied/);
+  await instance.handleInput("x");
+  assert.equal(attempts, 1);
+});

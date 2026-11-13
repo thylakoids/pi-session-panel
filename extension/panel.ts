@@ -203,7 +203,6 @@ function commandMatches(command: PanelCommand, data: string): boolean {
 
 interface Confirmation {
   row: SessionRow;
-  confirm: boolean;
 }
 
 export class SessionsPanel {
@@ -360,7 +359,7 @@ export class SessionsPanel {
       else if (row.state === "idle") {
         await this.options.actions.exit(row);
         this.revision++;
-      } else this.confirmation = { row, confirm: false };
+      } else this.confirmation = { row };
     } catch (error) {
       this.error = error instanceof Error ? error.message : String(error);
     }
@@ -410,14 +409,6 @@ export class SessionsPanel {
       command(["escape"], "cancel", () => { this.rename?.generation?.abort(); this.rename = null; this.error = null; }),
       command(["left", "right"], "caret", (data) => this.editInput(data)),
       command(["home", "end"], "first / last character", (data) => this.editInput(data), false),
-    ];
-    if (this.confirmation) return [
-      command(["left", "right", "tab", "up", "down", "j", "k"], "choose", (data) => {
-        if (matchesKey(data, "tab")) this.confirmation!.confirm = !this.confirmation!.confirm;
-        else this.confirmation!.confirm = matchesKey(data, "j") || matchesKey(data, "down") || matchesKey(data, "right");
-      }, true, undefined, 3),
-      command(["return"], "confirm", () => this.confirm(this.confirmation!.confirm)),
-      command(["escape"], "cancel", () => { this.confirmation = null; }),
     ];
     if (this.searching) return [
       command(["up", "down"], "pick", (data) => this.move(matchesKey(data, "up") ? -1 : 1)),
@@ -478,6 +469,12 @@ export class SessionsPanel {
   private hint(theme: any, width: number): string {
     if (this.rename?.generation) return truncateToWidth(theme.fg("muted", "Generating name… · ") + this.keyHint(theme, "esc", "cancel"), width);
     if (this.busy) return truncateToWidth(theme.fg("muted", `${this.busy}…`), width);
+    if (this.confirmation) {
+      const full = "x again to delete permanently";
+      const action = width >= full.length + 13 ? full : "x delete";
+      const separator = width >= action.length + 13 ? " · " : "  ";
+      return truncateToWidth(theme.fg("error", action) + theme.fg("muted", separator) + this.keyHint(theme, "esc", "cancel"), width);
+    }
     const parts: [string, string][] = [];
     const commands = this.commands().filter((command) => command.footer)
       .sort((a, b) => (typeof a.footer === "number" ? a.footer : 50) - (typeof b.footer === "number" ? b.footer : 50));
@@ -589,8 +586,26 @@ export class SessionsPanel {
 
   async handleInput(data: string): Promise<void> {
     if (this.busy || this.disposed) return;
+    if (!this.rename && !this.searching && bindingMatches(data, "x") && isKeyRepeat(data)) return;
     if (this.rename?.generation && !matchesKey(data, "escape")) return;
     this.frameRows = null;
+    if (this.confirmation) {
+      if (isKeyRepeat(data)) return;
+      const target = this.confirmation.row;
+      const current = this.selectedRow();
+      const valid = current?.key === target.key && current.state === "closed" && current.sessionFile === target.sessionFile;
+      if (bindingMatches(data, "x")) {
+        if (valid) {
+          this.busy = "delete";
+          try { await this.confirm(true); }
+          finally { this.busy = null; this.revision++; }
+        } else { this.confirmation = null; this.revision++; }
+        return;
+      }
+      this.confirmation = null;
+      this.revision++;
+      if (matchesKey(data, "escape")) return;
+    }
     if ((this.rename || this.searching) && (this.pasting || data.includes("\x1b[200~"))) {
       this.pasting = !data.includes("\x1b[201~");
       this.editInput(data);
@@ -601,7 +616,7 @@ export class SessionsPanel {
       if (this.gTimer) clearTimeout(this.gTimer);
       this.gTimer = null;
     }
-    if (!this.help && !this.rename && !this.searching && !this.confirmation) {
+    if (!this.help && !this.rename && !this.searching) {
       this.error = null;
       this.clampSelection();
     }
@@ -669,7 +684,7 @@ export class SessionsPanel {
       this.helpScroll,
       this.revision, // Also covers Input's private caret and undo state.
       this.rename ? `${this.rename.row.key}:${this.rename.input.getValue()}` : "",
-      this.confirmation ? `${this.confirmation.row.key}:${this.confirmation.confirm}` : "",
+      this.confirmation ? `${this.confirmation.row.key}` : "",
       this.error ?? "",
       this.busy ?? "",
       this.windowStart,
@@ -731,7 +746,6 @@ export class SessionsPanel {
   }
 
   render(theme: any, width: number, height: number): string[] {
-    if (this.confirmation) height = Math.min(height, 12);
     const at = Date.now();
     this.frameRows = null;
     this.innerWidth = Math.max(1, width - 4);
@@ -780,32 +794,6 @@ export class SessionsPanel {
   /** Width last passed to render, so scrollIntoView can wrap the error line. */
   private innerWidth = 76;
 
-  private confirmationBody(theme: any, inner: number, budget: number): string[] {
-    const { row, confirm } = this.confirmation!;
-    const button = (label: string, selected: boolean, danger: boolean): string => {
-      const text = theme.fg(danger ? "error" : selected ? "text" : "muted", `[${selected ? "❯" : " "} ${label} ]`);
-      return selected ? theme.bg("selectedBg", theme.bold(text)) : text;
-    };
-    const cancel = button("Cancel", !confirm, false);
-    const remove = button("Delete", confirm, true);
-    const buttons = visibleWidth(cancel + "  " + remove) <= inner ? [cancel + "  " + remove] : [cancel, remove];
-    const available = Math.max(0, budget - buttons.length);
-    const details: string[] = [];
-    if (available) details.push(theme.bold(truncateToWidth(row.name, inner, "…")));
-    const warning = available >= 2;
-    const pathBudget = Math.min(3, Math.max(0, available - 1 - Number(warning) - Number(available >= 4) - Number(available >= 3)));
-    if (pathBudget) {
-      const path = wrapTextWithAnsi(row.sessionFile ?? row.cwd, inner);
-      const lines = path.slice(0, pathBudget);
-      if (path.length > lines.length) lines[lines.length - 1] = truncateToWidth(lines.at(-1)!, Math.max(0, inner - 1)) + "…";
-      details.push(...lines.map((line) => theme.fg("dim", line)));
-    }
-    if (available >= 4) details.push("");
-    if (warning) details.push(theme.fg("warning", "! Cannot be undone."));
-    if (available >= 3) details.push("");
-    return [...details, ...buttons];
-  }
-
   private renderFrame(theme: any, width: number, height: number, at: number): string[] {
     const inner = Math.max(1, width - 4);
     const border = (s: string) => theme.fg("borderMuted", s);
@@ -818,8 +806,6 @@ export class SessionsPanel {
     // list whose rows appear to be missing.
     const title = this.help
       ? "Keys"
-      : this.confirmation
-        ? theme.fg("error", "Delete permanently?")
       : this.rename
         ? "Rename session"
         : this.searching
@@ -828,18 +814,16 @@ export class SessionsPanel {
             ? `Sessions — filter: ${this.query}`
             : "Sessions";
 
-    const top = border(topBorder(title, this.confirmation ? "" : info, width));
+    const top = border(topBorder(title, info, width));
     const bottom = border("╰" + "─".repeat(Math.max(0, width - 2)) + "╯");
     const { budget, errorLines } = this.bodyBudget(height, inner);
-    const browsing = !this.help && !this.rename && !this.confirmation;
+    const browsing = !this.help && !this.rename;
     const hasAbove = browsing && this.windowStart > 0;
     const hasBelow = browsing && this.windowStart + budget < total;
 
     let body: string[] = [];
     if (this.help) {
       body = this.helpBody(theme, inner, Math.max(1, height - 5));
-    } else if (this.confirmation) {
-      body = this.confirmationBody(theme, inner, budget);
     } else if (this.rename) {
       body = this.rename.input.render(inner);
     } else {
@@ -922,7 +906,6 @@ export class SessionsPanel {
    * changing, or a selection moving, none of which a glyph comparison would see.
    */
   needsRedraw(theme: any, width: number, height: number): boolean {
-    if (this.confirmation) height = Math.min(height, 12);
     this.frameRows = null;
     this.clampSelection();
     return this.frameKey(theme, width, height, Date.now()) !== this.frameCache?.key;

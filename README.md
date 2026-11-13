@@ -52,7 +52,7 @@ pi install ~/Agent/pi-session-panel
 |---|---|---|
 | Working | 注册表里 `state: "working"` 的进程 | 打断当前运行（向 tmux pane 发 Esc） |
 | Idle | 注册表里 `state: "idle"` 的进程 | 目标核对实例凭据、会话和 Idle 状态后自行优雅退出 |
-| Closed | `SessionManager.listAll()`，与 `pi -r` 同源 | 删除磁盘上的会话文件（需确认） |
+| Closed | `SessionManager.listAll()`，与 `pi -r` 同源 | 删除磁盘上的会话文件（再按 x 确认） |
 
 零消息、仅含初始化元数据的空会话从 Idle 按 X 退出后直接删除，不进入 Closed。历史扫描也隐藏已有空会话，判断不依赖 `(new session)` 标题。
 
@@ -74,7 +74,7 @@ Idle 退出支持 macOS 和 Linux：更新后的目标 Pi 登记私有本地 soc
 | `Home` / `End`、`gg` / `G` | 跳到第一行 / 最后一行；输入框中 `Home` / `End` 移动文字光标 |
 | `Page Up` / `Page Down` | 列表和搜索结果按可见高度翻页 |
 | `Enter` / `→`（列表中） | Working、Idle：切换客户端到目标 pane（支持跨 tmux session）；Closed：恢复到 tmux session `pi-sessions` 的新窗口 |
-| `x` | 见上表；Closed 的删除仍需确认 |
+| `x` | 见上表；Closed 首次按 x 显示红色底栏提示，再按 x 删除，esc 取消；移动选择或其他操作取消待确认状态 |
 | `r` | 改名。`←` `→` `Home` `End` 移动光标，`Enter` 保存，`Esc` 取消 |
 | `Ctrl+G`（Rename 中） | 用自动命名配置的模型生成新草稿；再次按 Enter 才保存 |
 | `/` | 搜索（与 `pi -r` 同一套：模糊词、`"短语"`、`re:正则`）。`↑` `↓` 选结果，`Enter` 直接打开，`Esc` 清空；无结果或打开失败时保持可编辑 |
